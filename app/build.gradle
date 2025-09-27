@@ -44,6 +44,36 @@ android {
     }
 }
 
+def faceLandmarkerModelUrl = 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/latest/face_landmarker.task'
+def faceLandmarkerModelPath = "${projectDir}/src/main/assets/face_landmarker.task"
+
+tasks.register('downloadFaceLandmarkerModel') {
+    outputs.file(faceLandmarkerModelPath)
+    doLast {
+        def destination = file(faceLandmarkerModelPath)
+        if (destination.exists()) {
+            logger.lifecycle("MediaPipe Face Landmarker model already present at ${destination}")
+            return
+        }
+
+        destination.parentFile.mkdirs()
+        logger.lifecycle("Downloading MediaPipe Face Landmarker model from ${faceLandmarkerModelUrl}")
+        try {
+            new URL(faceLandmarkerModelUrl).withInputStream { input ->
+                destination.withOutputStream { output ->
+                    output << input
+                }
+            }
+            logger.lifecycle("Saved MediaPipe Face Landmarker model to ${destination}")
+        } catch (Exception exception) {
+            destination.delete()
+            throw new GradleException("Unable to download MediaPipe Face Landmarker model", exception)
+        }
+    }
+}
+
+preBuild.dependsOn downloadFaceLandmarkerModel
+
 dependencies {
     implementation 'androidx.core:core-ktx:1.13.1'
     implementation 'androidx.appcompat:appcompat:1.7.0'
@@ -58,6 +88,7 @@ dependencies {
     implementation 'androidx.camera:camera-view:1.3.4'
 
     implementation 'com.google.mlkit:face-detection:16.1.5'
+    implementation 'com.google.mediapipe:tasks-vision:0.10.14'
 
     testImplementation 'junit:junit:4.13.2'
     androidTestImplementation 'androidx.test.ext:junit:1.2.1'

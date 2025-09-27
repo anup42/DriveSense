@@ -1,17 +1,33 @@
 package com.drivesense.drivesense
 
+import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.ImageFormat
+import android.graphics.Matrix
 import android.graphics.PointF
+import android.graphics.Rect
+import android.graphics.YuvImage
 import android.os.SystemClock
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
+import com.google.mediapipe.framework.image.BitmapImageBuilder
+import com.google.mediapipe.tasks.components.containers.NormalizedLandmark
+import com.google.mediapipe.tasks.core.BaseOptions
+import com.google.mediapipe.tasks.vision.core.RunningMode
+import com.google.mediapipe.tasks.vision.facelandmarker.FaceLandmarker
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.face.Face
 import com.google.mlkit.vision.face.FaceContour
 import com.google.mlkit.vision.face.FaceDetector
+import java.io.ByteArrayOutputStream
 import java.util.concurrent.Executor
+import kotlin.LazyThreadSafetyMode
 import kotlin.math.abs
+import kotlin.math.hypot
 
 class DriveSenseAnalyzer(
+    private val context: Context,
     private val detector: FaceDetector,
     private val mainExecutor: Executor,
     private val onStateUpdated: (DriverState) -> Unit,
@@ -25,6 +41,28 @@ class DriveSenseAnalyzer(
     private val rightEyeAspectFilter = ExponentialMovingAverage(SMOOTHING_ALPHA)
     private val leftEyeProbabilityFilter = ExponentialMovingAverage(SMOOTHING_ALPHA)
     private val rightEyeProbabilityFilter = ExponentialMovingAverage(SMOOTHING_ALPHA)
+    private val mediaPipeLeftEarFilter = ExponentialMovingAverage(SMOOTHING_ALPHA)
+    private val mediaPipeRightEarFilter = ExponentialMovingAverage(SMOOTHING_ALPHA)
+    private val mediaPipeLeftProbabilityFilter = ExponentialMovingAverage(SMOOTHING_ALPHA)
+    private val mediaPipeRightProbabilityFilter = ExponentialMovingAverage(SMOOTHING_ALPHA)
+
+    private var faceLandmarkerInitialized = false
+    private val faceLandmarker: FaceLandmarker by lazy(LazyThreadSafetyMode.NONE) {
+        faceLandmarkerInitialized = true
+        val options = FaceLandmarker.FaceLandmarkerOptions.builder()
+            .setBaseOptions(
+                BaseOptions.builder()
+                    .setModelAssetPath(FACE_LANDMARKER_ASSET)
+                    .build()
+            )
+            .setRunningMode(RunningMode.VIDEO)
+            .setNumFaces(1)
+            .setMinFaceDetectionConfidence(0.5f)
+            .setMinFaceTrackingConfidence(0.5f)
+            .setMinFacePresenceConfidence(0.5f)
+            .build()
+        FaceLandmarker.createFromOptions(context, options)
+    }
 
     override fun analyze(imageProxy: ImageProxy) {
         val mediaImage = imageProxy.image
@@ -33,10 +71,14 @@ class DriveSenseAnalyzer(
             return
         }
 
-        val inputImage = InputImage.fromMediaImage(mediaImage, imageProxy.imageInfo.rotationDegrees)
+        val rotationDegrees = imageProxy.imageInfo.rotationDegrees
+        val inputImage = InputImage.fromMediaImage(mediaImage, rotationDegrees)
+        val mediaPipeMetrics = runCatching {
+            imageProxyToBitmap(imageProxy)?.let { detectWithMediaPipe(it) }
+        }.getOrNull()
         detector.process(inputImage)
             .addOnSuccessListener { faces ->
-                val newState = evaluateState(faces)
+                val newState = evaluateState(faces, mediaPipeMetrics)
                 publishState(newState)
             }
             .addOnFailureListener { error ->
@@ -47,9 +89,19 @@ class DriveSenseAnalyzer(
             }
     }
 
-    private fun evaluateState(faces: List<Face>): DriverState {
+    fun close() {
+        if (faceLandmarkerInitialized) {
+            faceLandmarker.close()
+        }
+    }
+
+    private fun evaluateState(
+        faces: List<Face>,
+        mediaPipeMetrics: MediaPipeEyeMetrics?
+    ): DriverState {
         if (faces.isEmpty()) {
             lastEyesClosedAt = NO_TIMESTAMP
+            resetMediaPipeFilters()
             return DriverState.NoFace
         }
 
@@ -103,13 +155,67 @@ class DriveSenseAnalyzer(
         val eyesOpenByContour = listOfNotNull(smoothedLeftAspectRatio, smoothedRightAspectRatio)
             .any { it >= EYE_ASPECT_OPEN_THRESHOLD }
 
-        if (!classificationAvailable && !contourAvailable) {
+        val mediaPipeLeftEar = mediaPipeMetrics?.leftEar?.let { mediaPipeLeftEarFilter.update(it) } ?: run {
+            mediaPipeLeftEarFilter.reset()
+            null
+        }
+        val mediaPipeRightEar = mediaPipeMetrics?.rightEar?.let { mediaPipeRightEarFilter.update(it) } ?: run {
+            mediaPipeRightEarFilter.reset()
+            null
+        }
+        val mediaPipeLeftProbability = mediaPipeMetrics?.leftOpenProbability?.let {
+            mediaPipeLeftProbabilityFilter.update(it)
+        } ?: run {
+            mediaPipeLeftProbabilityFilter.reset()
+            null
+        }
+        val mediaPipeRightProbability = mediaPipeMetrics?.rightOpenProbability?.let {
+            mediaPipeRightProbabilityFilter.update(it)
+        } ?: run {
+            mediaPipeRightProbabilityFilter.reset()
+            null
+        }
+
+        val mediaPipeAspectAvailable = mediaPipeLeftEar != null && mediaPipeRightEar != null
+        val mediaPipeProbabilityAvailable = mediaPipeLeftProbability != null && mediaPipeRightProbability != null
+
+        val mediaPipeEyesClosedByAspect = if (mediaPipeAspectAvailable) {
+            mediaPipeLeftEar!! < MEDIAPIPE_EYE_ASPECT_CLOSED_THRESHOLD &&
+                mediaPipeRightEar!! < MEDIAPIPE_EYE_ASPECT_CLOSED_THRESHOLD
+        } else {
+            false
+        }
+        val mediaPipeEyesOpenByAspect = listOfNotNull(mediaPipeLeftEar, mediaPipeRightEar)
+            .any { it >= MEDIAPIPE_EYE_ASPECT_OPEN_THRESHOLD }
+
+        val mediaPipeEyesClosedByProbability = if (mediaPipeProbabilityAvailable) {
+            mediaPipeLeftProbability!! < MEDIAPIPE_MIN_EYE_OPEN_PROBABILITY &&
+                mediaPipeRightProbability!! < MEDIAPIPE_MIN_EYE_OPEN_PROBABILITY
+        } else {
+            false
+        }
+        val mediaPipeEyesOpenByProbability = listOfNotNull(mediaPipeLeftProbability, mediaPipeRightProbability)
+            .any { it >= MEDIAPIPE_OPEN_EYE_PROB_THRESHOLD }
+
+        if (!classificationAvailable && !contourAvailable &&
+            !mediaPipeAspectAvailable && !mediaPipeProbabilityAvailable
+        ) {
             lastEyesClosedAt = NO_TIMESTAMP
             return DriverState.Attentive
         }
 
-        val votesForClosed = sequenceOf(eyesClosedByProbability, eyesClosedByContour).count { it }
-        val votesForOpen = sequenceOf(eyesOpenByProbability, eyesOpenByContour).count { it }
+        val votesForClosed = listOf(
+            eyesClosedByProbability,
+            eyesClosedByContour,
+            mediaPipeEyesClosedByAspect,
+            mediaPipeEyesClosedByProbability
+        ).count { it }
+        val votesForOpen = listOf(
+            eyesOpenByProbability,
+            eyesOpenByContour,
+            mediaPipeEyesOpenByAspect,
+            mediaPipeEyesOpenByProbability
+        ).count { it }
 
         val eyesClosed = when {
             votesForClosed == 0 -> false
@@ -133,6 +239,147 @@ class DriveSenseAnalyzer(
         lastEyesClosedAt = NO_TIMESTAMP
         return DriverState.Attentive
     }
+
+    private fun detectWithMediaPipe(bitmap: Bitmap): MediaPipeEyeMetrics? {
+        val mpImage = BitmapImageBuilder(bitmap).build()
+        val result = faceLandmarker.detectForVideo(mpImage, SystemClock.uptimeMillis())
+        if (result.faceLandmarks().isEmpty()) return null
+
+        val landmarks = result.faceLandmarks()[0]
+        val leftEar = ear(
+            landmarks,
+            pOuter = 33,
+            pInner = 133,
+            pUpA = 160,
+            pDownA = 144,
+            pUpB = 158,
+            pDownB = 153
+        )
+        val rightEar = ear(
+            landmarks,
+            pOuter = 362,
+            pInner = 263,
+            pUpA = 385,
+            pDownA = 380,
+            pUpB = 387,
+            pDownB = 373
+        )
+
+        val leftProbability = mapEarToOpenProb(leftEar)
+        val rightProbability = mapEarToOpenProb(rightEar)
+
+        return MediaPipeEyeMetrics(
+            leftEar = leftEar,
+            rightEar = rightEar,
+            leftOpenProbability = leftProbability,
+            rightOpenProbability = rightProbability
+        )
+    }
+
+    private fun ear(
+        landmarks: List<NormalizedLandmark>,
+        pOuter: Int,
+        pInner: Int,
+        pUpA: Int,
+        pDownA: Int,
+        pUpB: Int,
+        pDownB: Int
+    ): Float {
+        fun distance(i: Int, j: Int): Float {
+            val a = landmarks[i]
+            val b = landmarks[j]
+            return hypot(a.x() - b.x(), a.y() - b.y())
+        }
+
+        val horizontal = distance(pOuter, pInner)
+        if (horizontal <= 1e-6f) {
+            return 0f
+        }
+
+        val verticalA = distance(pUpA, pDownA)
+        val verticalB = distance(pUpB, pDownB)
+        val ear = ((verticalA + verticalB) / (2f * horizontal)).coerceIn(0f, 1f)
+        return ear
+    }
+
+    private fun mapEarToOpenProb(ear: Float): Float {
+        val clamped = ear.coerceIn(0f, 1f)
+        val t = ((clamped - MEDIAPIPE_EAR_CLOSED) / (MEDIAPIPE_EAR_OPEN - MEDIAPIPE_EAR_CLOSED))
+            .coerceIn(0f, 1f)
+        return t * t * (3f - 2f * t)
+    }
+
+    private fun imageProxyToBitmap(image: ImageProxy): Bitmap? {
+        val planes = image.planes
+        if (planes.size < 3) return null
+
+        val yBuffer = planes[0].buffer
+        val uBuffer = planes[1].buffer
+        val vBuffer = planes[2].buffer
+
+        val ySize = yBuffer.remaining()
+        val uSize = uBuffer.remaining()
+        val vSize = vBuffer.remaining()
+
+        val nv21 = ByteArray(ySize + uSize + vSize)
+        yBuffer.get(nv21, 0, ySize)
+
+        val pixelStride = planes[2].pixelStride
+        val rowStride = planes[2].rowStride
+        val width = image.width
+        val height = image.height
+        var offset = ySize
+
+        if (pixelStride == 2 && rowStride == width) {
+            vBuffer.get(nv21, offset, vSize)
+            offset += vSize
+            uBuffer.get(nv21, offset, uSize)
+        } else {
+            val vBytes = ByteArray(vSize)
+            val uBytes = ByteArray(uSize)
+            vBuffer.get(vBytes)
+            uBuffer.get(uBytes)
+            for (row in 0 until height / 2) {
+                for (col in 0 until width / 2) {
+                    val vuIndex = row * rowStride + col * pixelStride
+                    nv21[offset++] = vBytes[vuIndex]
+                    nv21[offset++] = uBytes[vuIndex]
+                }
+            }
+        }
+
+        yBuffer.rewind()
+        uBuffer.rewind()
+        vBuffer.rewind()
+
+        val yuvImage = YuvImage(nv21, ImageFormat.NV21, width, height, null)
+        val out = ByteArrayOutputStream()
+        yuvImage.compressToJpeg(Rect(0, 0, width, height), 90, out)
+        val jpegBytes = out.toByteArray()
+        val bitmap = BitmapFactory.decodeByteArray(jpegBytes, 0, jpegBytes.size) ?: return null
+        return bitmap.rotate(image.imageInfo.rotationDegrees)
+    }
+
+    private fun Bitmap.rotate(degrees: Int): Bitmap {
+        if (degrees == 0) return this
+        val matrix = Matrix()
+        matrix.postRotate(degrees.toFloat())
+        return Bitmap.createBitmap(this, 0, 0, width, height, matrix, true)
+    }
+
+    private fun resetMediaPipeFilters() {
+        mediaPipeLeftEarFilter.reset()
+        mediaPipeRightEarFilter.reset()
+        mediaPipeLeftProbabilityFilter.reset()
+        mediaPipeRightProbabilityFilter.reset()
+    }
+
+    private data class MediaPipeEyeMetrics(
+        val leftEar: Float,
+        val rightEar: Float,
+        val leftOpenProbability: Float,
+        val rightOpenProbability: Float
+    )
 
     private fun computeEyeAspectRatio(points: List<PointF>?): Float? {
         val eyePoints = points ?: return null
@@ -192,6 +439,13 @@ class DriveSenseAnalyzer(
         private const val OPEN_EYE_PROB_THRESHOLD = 0.55f
         private const val VERTICAL_TRIM_RATIO = 0.2f
         private const val SMOOTHING_ALPHA = 0.35f
+        private const val FACE_LANDMARKER_ASSET = "face_landmarker.task"
+        private const val MEDIAPIPE_EAR_CLOSED = 0.20f
+        private const val MEDIAPIPE_EAR_OPEN = 0.30f
+        private const val MEDIAPIPE_EYE_ASPECT_CLOSED_THRESHOLD = 0.20f
+        private const val MEDIAPIPE_EYE_ASPECT_OPEN_THRESHOLD = 0.30f
+        private const val MEDIAPIPE_MIN_EYE_OPEN_PROBABILITY = 0.30f
+        private const val MEDIAPIPE_OPEN_EYE_PROB_THRESHOLD = 0.60f
     }
 }
 

@@ -120,6 +120,7 @@ class MainActivity : AppCompatActivity() {
             .build()
 
         analyzer = DriveSenseAnalyzer(
+            context = applicationContext,
             detector = faceDetector!!,
             mainExecutor = mainThreadExecutor,
             onStateUpdated = ::handleDriverState
@@ -189,6 +190,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun releaseCamera() {
         cameraProvider?.unbindAll()
+        analyzer?.close()
         analyzer = null
         faceDetector?.close()
         faceDetector = null
