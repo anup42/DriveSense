@@ -20,6 +20,7 @@ import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.core.content.ContextCompat
+import androidx.core.content.edit
 import com.drivesense.drivesense.databinding.ActivityMainBinding
 import com.google.mlkit.vision.face.FaceDetection
 import com.google.mlkit.vision.face.FaceDetector
@@ -41,6 +42,10 @@ class MainActivity : AppCompatActivity() {
     private var analyzer: DriveSenseAnalyzer? = null
     private var toneGenerator: ToneGenerator? = null
     private var lastAlertTimestamp: Long = 0L
+    private lateinit var drivingStatusMonitor: DrivingStatusMonitor
+    private var drivingDetectionStatus: DrivingDetectionStatus = DrivingDetectionStatus.UNKNOWN
+    private var requireDrivingCheck: Boolean = true
+    private var latestDriverState: DriverState = DriverState.Initializing
 
     private val permissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
@@ -52,6 +57,7 @@ class MainActivity : AppCompatActivity() {
         }
 
     private val mainThreadExecutor: Executor by lazy { ContextCompat.getMainExecutor(this) }
+    private val settings by lazy { getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE) }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -60,6 +66,21 @@ class MainActivity : AppCompatActivity() {
 
         cameraExecutor = Executors.newSingleThreadExecutor()
         binding.lastEventText.visibility = View.GONE
+        requireDrivingCheck = settings.getBoolean(KEY_REQUIRE_DRIVING_CHECK, true)
+        drivingStatusMonitor = DrivingStatusMonitor(
+            context = this,
+            callbackExecutor = mainThreadExecutor,
+            onStatusChanged = ::onDrivingStatusChanged
+        )
+
+        binding.drivingCheckSwitch.isChecked = requireDrivingCheck
+        binding.drivingCheckSwitch.setOnCheckedChangeListener { _, isChecked ->
+            requireDrivingCheck = isChecked
+            settings.edit { putBoolean(KEY_REQUIRE_DRIVING_CHECK, isChecked) }
+            renderDriverState()
+        }
+        updateDrivingStatusUi()
+
         handleDriverState(DriverState.Initializing)
 
         if (hasCameraPermission()) {
@@ -67,6 +88,16 @@ class MainActivity : AppCompatActivity() {
         } else {
             permissionLauncher.launch(Manifest.permission.CAMERA)
         }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        drivingStatusMonitor.start()
+    }
+
+    override fun onPause() {
+        super.onPause()
+        drivingStatusMonitor.stop()
     }
 
     override fun onDestroy() {
@@ -131,8 +162,42 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun handleDriverState(state: DriverState) {
+        latestDriverState = state
+        renderDriverState()
+    }
+
+    private fun renderDriverState() {
+        val state = latestDriverState
         when (state) {
-            DriverState.Initializing -> setStatus(getString(R.string.status_initializing), R.color.white)
+            DriverState.Initializing -> {
+                setStatus(getString(R.string.status_initializing), R.color.white)
+                return
+            }
+            is DriverState.Error -> {
+                setStatus(state.reason, R.color.status_drowsy)
+                binding.lastEventText.visibility = View.GONE
+                return
+            }
+            else -> Unit
+        }
+
+        if (requireDrivingCheck) {
+            when (drivingDetectionStatus) {
+                DrivingDetectionStatus.DRIVING -> Unit
+                DrivingDetectionStatus.UNAVAILABLE -> {
+                    setStatus(getString(R.string.status_driving_detection_unavailable), R.color.status_warning)
+                    binding.lastEventText.visibility = View.GONE
+                    return
+                }
+                DrivingDetectionStatus.UNKNOWN, DrivingDetectionStatus.STATIONARY -> {
+                    setStatus(getString(R.string.status_waiting_for_driving), R.color.status_warning)
+                    binding.lastEventText.visibility = View.GONE
+                    return
+                }
+            }
+        }
+
+        when (state) {
             DriverState.NoFace -> setStatus(getString(R.string.status_searching), R.color.status_warning)
             DriverState.Attentive -> setStatus(getString(R.string.status_attentive), R.color.status_attentive)
             is DriverState.Drowsy -> {
@@ -141,10 +206,7 @@ class MainActivity : AppCompatActivity() {
                 setStatus(message, R.color.status_drowsy)
                 triggerAlerts()
             }
-            is DriverState.Error -> {
-                setStatus(state.reason, R.color.status_drowsy)
-                binding.lastEventText.visibility = View.GONE
-            }
+            else -> Unit
         }
     }
 
@@ -178,6 +240,22 @@ class MainActivity : AppCompatActivity() {
         return toneGenerator!!
     }
 
+    private fun onDrivingStatusChanged(status: DrivingDetectionStatus) {
+        drivingDetectionStatus = status
+        updateDrivingStatusUi()
+        renderDriverState()
+    }
+
+    private fun updateDrivingStatusUi() {
+        val text = when (drivingDetectionStatus) {
+            DrivingDetectionStatus.DRIVING -> getString(R.string.status_driving_detected)
+            DrivingDetectionStatus.STATIONARY -> getString(R.string.status_not_moving)
+            DrivingDetectionStatus.UNAVAILABLE -> getString(R.string.status_driving_detection_unavailable)
+            DrivingDetectionStatus.UNKNOWN -> getString(R.string.status_driving_unknown)
+        }
+        binding.drivingStatusText.text = text
+    }
+
     private fun vibrate() {
         val vibrator = getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator ?: return
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -201,6 +279,8 @@ class MainActivity : AppCompatActivity() {
         private const val ALERT_TONE_DURATION_MS = 800L
         private const val VIBRATION_DURATION_MS = 500L
         private const val TONE_VOLUME = 100
+        private const val PREFS_NAME = "drivesense_settings"
+        private const val KEY_REQUIRE_DRIVING_CHECK = "require_driving_check"
     }
 }
 
