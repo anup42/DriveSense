@@ -1,0 +1,11 @@
+# Gradle builds
+.gradle/
+build/
+app/build/
+
+# IDE files
+*.iml
+.idea/
+
+# MediaPipe model asset downloaded at build time
+app/src/main/assets/face_landmarker.task
