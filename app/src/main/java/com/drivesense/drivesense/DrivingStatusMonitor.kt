@@ -14,7 +14,8 @@ class DrivingStatusMonitor(
     private val callbackExecutor: Executor,
     private val onStatusChanged: (DrivingDetectionStatus) -> Unit,
     private val motionThreshold: Float = DEFAULT_MOTION_THRESHOLD,
-    private val stationaryTimeoutMs: Long = DEFAULT_STATIONARY_TIMEOUT_MS
+    private val stationaryTimeoutMs: Long = DEFAULT_STATIONARY_TIMEOUT_MS,
+    private val drivingActivationMs: Long = DEFAULT_DRIVING_ACTIVATION_MS
 ) : SensorEventListener {
 
     private val sensorManager = context.getSystemService(Context.SENSOR_SERVICE) as SensorManager
@@ -22,6 +23,7 @@ class DrivingStatusMonitor(
         sensorManager.getDefaultSensor(Sensor.TYPE_LINEAR_ACCELERATION)
 
     private var lastMotionTimestamp: Long = NO_TIMESTAMP
+    private var drivingCandidateStart: Long = NO_TIMESTAMP
 
     var status: DrivingDetectionStatus =
         if (linearAccelerationSensor == null) DrivingDetectionStatus.UNAVAILABLE else DrivingDetectionStatus.UNKNOWN
@@ -35,6 +37,7 @@ class DrivingStatusMonitor(
         }
 
         lastMotionTimestamp = NO_TIMESTAMP
+        drivingCandidateStart = NO_TIMESTAMP
         sensorManager.registerListener(
             this,
             linearAccelerationSensor,
@@ -46,6 +49,7 @@ class DrivingStatusMonitor(
     fun stop() {
         sensorManager.unregisterListener(this)
         lastMotionTimestamp = NO_TIMESTAMP
+        drivingCandidateStart = NO_TIMESTAMP
         if (status != DrivingDetectionStatus.UNAVAILABLE) {
             notifyStatus(DrivingDetectionStatus.UNKNOWN)
         }
@@ -61,9 +65,20 @@ class DrivingStatusMonitor(
 
         if (magnitude >= motionThreshold) {
             lastMotionTimestamp = now
-            notifyStatus(DrivingDetectionStatus.DRIVING)
+            if (status != DrivingDetectionStatus.DRIVING) {
+                if (drivingCandidateStart == NO_TIMESTAMP) {
+                    drivingCandidateStart = now
+                }
+                if (now - drivingCandidateStart >= drivingActivationMs) {
+                    notifyStatus(DrivingDetectionStatus.DRIVING)
+                }
+            } else {
+                drivingCandidateStart = now
+            }
             return
         }
+
+        drivingCandidateStart = NO_TIMESTAMP
 
         if (lastMotionTimestamp == NO_TIMESTAMP) {
             lastMotionTimestamp = now
@@ -88,6 +103,7 @@ class DrivingStatusMonitor(
     companion object {
         private const val DEFAULT_MOTION_THRESHOLD = 1.2f
         private const val DEFAULT_STATIONARY_TIMEOUT_MS = 15000L
+        private const val DEFAULT_DRIVING_ACTIVATION_MS = 2000L
         private const val NO_TIMESTAMP = -1L
     }
 }
