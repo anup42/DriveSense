@@ -58,7 +58,7 @@ class DriveSenseAnalyzer(
             .setRunningMode(RunningMode.VIDEO)
             .setNumFaces(1)
             .setMinFaceDetectionConfidence(0.5f)
-            .setMinFaceTrackingConfidence(0.5f)
+            .setMinTrackingConfidence(0.5f)
             .setMinFacePresenceConfidence(0.5f)
             .build()
         FaceLandmarker.createFromOptions(context, options)
