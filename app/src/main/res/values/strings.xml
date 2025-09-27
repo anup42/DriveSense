@@ -9,4 +9,10 @@
     <string name="event_placeholder">No events yet</string>
     <string name="event_last_alert">Last alert: %1$s</string>
     <string name="status_error">Camera offline. Please restart DriveSense.</string>
+    <string name="label_require_driving">Require driving detection</string>
+    <string name="status_waiting_for_driving">Waiting for vehicle motion…</string>
+    <string name="status_driving_detection_unavailable">Driving detection unavailable. Disable the driving check to continue.</string>
+    <string name="status_driving_detected">Driving detected</string>
+    <string name="status_not_moving">Vehicle stationary</string>
+    <string name="status_driving_unknown">Detecting driving status…</string>
 </resources>
