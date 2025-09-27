@@ -20,6 +20,10 @@ class DriveSenseAnalyzer(
 
     private var lastEyesClosedAt: Long = NO_TIMESTAMP
     private var lastState: DriverState = DriverState.Initializing
+    private val leftEyeAspectFilter = ExponentialMovingAverage(SMOOTHING_ALPHA)
+    private val rightEyeAspectFilter = ExponentialMovingAverage(SMOOTHING_ALPHA)
+    private val leftEyeProbabilityFilter = ExponentialMovingAverage(SMOOTHING_ALPHA)
+    private val rightEyeProbabilityFilter = ExponentialMovingAverage(SMOOTHING_ALPHA)
 
     override fun analyze(imageProxy: ImageProxy) {
         val mediaImage = imageProxy.image
@@ -49,42 +53,67 @@ class DriveSenseAnalyzer(
         }
 
         val primaryFace = faces.maxByOrNull { it.boundingBox.width() * it.boundingBox.height() } ?: faces.first()
-        val leftEyeProbability = primaryFace.leftEyeOpenProbability ?: UNKNOWN_PROBABILITY
-        val rightEyeProbability = primaryFace.rightEyeOpenProbability ?: UNKNOWN_PROBABILITY
+        val leftEyeProbability = primaryFace.leftEyeOpenProbability
+        val rightEyeProbability = primaryFace.rightEyeOpenProbability
+        val smoothedLeftEyeProbability = leftEyeProbability?.takeIf { it >= 0f }?.let {
+            leftEyeProbabilityFilter.update(it)
+        } ?: run {
+            leftEyeProbabilityFilter.reset()
+            null
+        }
+        val smoothedRightEyeProbability = rightEyeProbability?.takeIf { it >= 0f }?.let {
+            rightEyeProbabilityFilter.update(it)
+        } ?: run {
+            rightEyeProbabilityFilter.reset()
+            null
+        }
 
-        val classificationAvailable = leftEyeProbability >= 0f && rightEyeProbability >= 0f
-        val eyesClosedByProbability = classificationAvailable &&
-            leftEyeProbability < minEyeOpenProbability &&
-            rightEyeProbability < minEyeOpenProbability
-        val eyesOpenByProbability = classificationAvailable &&
-            leftEyeProbability >= OPEN_EYE_PROB_THRESHOLD &&
-            rightEyeProbability >= OPEN_EYE_PROB_THRESHOLD
+        val classificationAvailable = smoothedLeftEyeProbability != null && smoothedRightEyeProbability != null
+        val eyesClosedByProbability = if (classificationAvailable) {
+            smoothedLeftEyeProbability!! < minEyeOpenProbability &&
+                smoothedRightEyeProbability!! < minEyeOpenProbability
+        } else {
+            false
+        }
+        val eyesOpenByProbability = if (classificationAvailable) {
+            smoothedLeftEyeProbability!! >= OPEN_EYE_PROB_THRESHOLD &&
+                smoothedRightEyeProbability!! >= OPEN_EYE_PROB_THRESHOLD
+        } else {
+            false
+        }
 
         val leftEyeAspectRatio = computeEyeAspectRatio(primaryFace.getContour(FaceContour.LEFT_EYE)?.points)
         val rightEyeAspectRatio = computeEyeAspectRatio(primaryFace.getContour(FaceContour.RIGHT_EYE)?.points)
-        val contourAvailable = leftEyeAspectRatio != null && rightEyeAspectRatio != null
-        val eyesClosedByContour = leftEyeAspectRatio?.let { leftRatio ->
-            rightEyeAspectRatio?.let { rightRatio ->
+        val smoothedLeftAspectRatio = leftEyeAspectRatio?.let { leftEyeAspectFilter.update(it) } ?: run {
+            leftEyeAspectFilter.reset()
+            null
+        }
+        val smoothedRightAspectRatio = rightEyeAspectRatio?.let { rightEyeAspectFilter.update(it) } ?: run {
+            rightEyeAspectFilter.reset()
+            null
+        }
+
+        val contourAvailable = smoothedLeftAspectRatio != null && smoothedRightAspectRatio != null
+        val eyesClosedByContour = smoothedLeftAspectRatio?.let { leftRatio ->
+            smoothedRightAspectRatio?.let { rightRatio ->
                 leftRatio < EYE_ASPECT_CLOSED_THRESHOLD && rightRatio < EYE_ASPECT_CLOSED_THRESHOLD
             }
         } ?: false
-        val eyesOpenByContour = leftEyeAspectRatio?.let { leftRatio ->
-            rightEyeAspectRatio?.let { rightRatio ->
-                leftRatio >= EYE_ASPECT_OPEN_THRESHOLD || rightRatio >= EYE_ASPECT_OPEN_THRESHOLD
-            }
-        } ?: false
+        val eyesOpenByContour = listOfNotNull(smoothedLeftAspectRatio, smoothedRightAspectRatio)
+            .any { it >= EYE_ASPECT_OPEN_THRESHOLD }
 
         if (!classificationAvailable && !contourAvailable) {
             lastEyesClosedAt = NO_TIMESTAMP
             return DriverState.Attentive
         }
 
+        val votesForClosed = sequenceOf(eyesClosedByProbability, eyesClosedByContour).count { it }
+        val votesForOpen = sequenceOf(eyesOpenByProbability, eyesOpenByContour).count { it }
+
         val eyesClosed = when {
-            eyesClosedByProbability && eyesOpenByContour -> false
-            eyesClosedByProbability -> true
-            eyesClosedByContour -> true
-            eyesOpenByProbability -> false
-            eyesOpenByContour -> false
+            votesForClosed == 0 -> false
+            votesForOpen > votesForClosed -> false
+            votesForClosed > votesForOpen -> true
             else -> false
         }
 
@@ -108,22 +137,24 @@ class DriveSenseAnalyzer(
         val eyePoints = points ?: return null
         if (eyePoints.size < MIN_CONTOUR_POINTS) return null
 
-        var minX = Float.MAX_VALUE
-        var maxX = -Float.MAX_VALUE
-        var minY = Float.MAX_VALUE
-        var maxY = -Float.MAX_VALUE
-
-        for (point in eyePoints) {
-            if (point.x < minX) minX = point.x
-            if (point.x > maxX) maxX = point.x
-            if (point.y < minY) minY = point.y
-            if (point.y > maxY) maxY = point.y
-        }
-
-        val horizontal = maxX - minX
-        val vertical = maxY - minY
+        val sortedX = eyePoints.map { it.x }.sorted()
+        val sortedY = eyePoints.map { it.y }.sorted()
+        val horizontal = computeTrimmedRange(sortedX, TRIM_RATIO)
+        val vertical = computeTrimmedRange(sortedY, TRIM_RATIO)
         if (horizontal <= 0f) return null
         return vertical / horizontal
+    }
+
+    private fun computeTrimmedRange(values: List<Float>, trimRatio: Float): Float {
+        if (values.isEmpty()) return 0f
+        if (values.size == 1) return 0f
+        val trimCount = (values.size * trimRatio).toInt().coerceAtMost(values.size / 2)
+        val lowerIndex = trimCount
+        val upperIndex = (values.size - 1) - trimCount
+        if (upperIndex <= lowerIndex) {
+            return values.last() - values.first()
+        }
+        return values[upperIndex] - values[lowerIndex]
     }
 
     private fun publishState(state: DriverState) {
@@ -133,11 +164,31 @@ class DriveSenseAnalyzer(
     }
 
     companion object {
-        private const val UNKNOWN_PROBABILITY = -1f
         private const val NO_TIMESTAMP = -1L
         private const val MIN_CONTOUR_POINTS = 4
         private const val EYE_ASPECT_CLOSED_THRESHOLD = 0.18f
         private const val EYE_ASPECT_OPEN_THRESHOLD = 0.26f
         private const val OPEN_EYE_PROB_THRESHOLD = 0.55f
+        private const val TRIM_RATIO = 0.2f
+        private const val SMOOTHING_ALPHA = 0.35f
+    }
+}
+
+private class ExponentialMovingAverage(private val alpha: Float) {
+    private var value: Float? = null
+
+    fun update(newValue: Float): Float {
+        val current = value
+        val updated = if (current == null) {
+            newValue
+        } else {
+            alpha * newValue + (1 - alpha) * current
+        }
+        value = updated
+        return updated
+    }
+
+    fun reset() {
+        value = null
     }
 }
