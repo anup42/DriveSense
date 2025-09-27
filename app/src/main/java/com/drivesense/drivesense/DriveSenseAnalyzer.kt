@@ -9,6 +9,7 @@ import com.google.mlkit.vision.face.Face
 import com.google.mlkit.vision.face.FaceContour
 import com.google.mlkit.vision.face.FaceDetector
 import java.util.concurrent.Executor
+import kotlin.math.abs
 
 class DriveSenseAnalyzer(
     private val detector: FaceDetector,
@@ -137,24 +138,43 @@ class DriveSenseAnalyzer(
         val eyePoints = points ?: return null
         if (eyePoints.size < MIN_CONTOUR_POINTS) return null
 
-        val sortedX = eyePoints.map { it.x }.sorted()
-        val sortedY = eyePoints.map { it.y }.sorted()
-        val horizontal = computeTrimmedRange(sortedX, TRIM_RATIO)
-        val vertical = computeTrimmedRange(sortedY, TRIM_RATIO)
+        val centerY = eyePoints.sumOf { it.y.toDouble() }.toFloat() / eyePoints.size
+        val topPoints = eyePoints.filter { it.y <= centerY }
+        val bottomPoints = eyePoints.filter { it.y > centerY }
+        if (topPoints.isEmpty() || bottomPoints.isEmpty()) return null
+
+        val leftmost = eyePoints.minByOrNull { it.x }?.x ?: return null
+        val rightmost = eyePoints.maxByOrNull { it.x }?.x ?: return null
+        val horizontal = rightmost - leftmost
         if (horizontal <= 0f) return null
-        return vertical / horizontal
+
+        val verticalSamples = mutableListOf<Float>()
+        for (top in topPoints) {
+            val pairedBottom = bottomPoints.minByOrNull { abs(it.x - top.x) } ?: continue
+            verticalSamples += abs(pairedBottom.y - top.y)
+        }
+
+        if (verticalSamples.size < MIN_VERTICAL_SAMPLES) return null
+
+        val vertical = computeTrimmedMean(verticalSamples, VERTICAL_TRIM_RATIO)
+        if (vertical <= 0f) return null
+
+        return (vertical / horizontal).coerceAtLeast(0f)
     }
 
-    private fun computeTrimmedRange(values: List<Float>, trimRatio: Float): Float {
+    private fun computeTrimmedMean(values: List<Float>, trimRatio: Float): Float {
         if (values.isEmpty()) return 0f
-        if (values.size == 1) return 0f
-        val trimCount = (values.size * trimRatio).toInt().coerceAtMost(values.size / 2)
-        val lowerIndex = trimCount
-        val upperIndex = (values.size - 1) - trimCount
-        if (upperIndex <= lowerIndex) {
-            return values.last() - values.first()
+        if (values.size == 1) return values.first()
+
+        val sorted = values.sorted()
+        val trimCount = (sorted.size * trimRatio).toInt().coerceAtMost(sorted.lastIndex / 2)
+        val fromIndex = trimCount
+        val toIndex = sorted.size - trimCount
+        if (toIndex <= fromIndex) {
+            return sorted.average().toFloat()
         }
-        return values[upperIndex] - values[lowerIndex]
+        val trimmed = sorted.subList(fromIndex, toIndex)
+        return trimmed.average().toFloat()
     }
 
     private fun publishState(state: DriverState) {
@@ -166,10 +186,11 @@ class DriveSenseAnalyzer(
     companion object {
         private const val NO_TIMESTAMP = -1L
         private const val MIN_CONTOUR_POINTS = 4
+        private const val MIN_VERTICAL_SAMPLES = 3
         private const val EYE_ASPECT_CLOSED_THRESHOLD = 0.18f
         private const val EYE_ASPECT_OPEN_THRESHOLD = 0.26f
         private const val OPEN_EYE_PROB_THRESHOLD = 0.55f
-        private const val TRIM_RATIO = 0.2f
+        private const val VERTICAL_TRIM_RATIO = 0.2f
         private const val SMOOTHING_ALPHA = 0.35f
     }
 }
