@@ -1,0 +1,14 @@
+[
+    {
+        "merged": "C:\\Users\\anupk\\.gradle\\daemon\\8.7\\com.drivesense.drivesense.app-debug-43:\\drawable_status_background.xml.flat",
+        "source": "C:\\Users\\anupk\\.gradle\\daemon\\8.7\\com.drivesense.drivesense.app-main-45:\\drawable\\status_background.xml"
+    },
+    {
+        "merged": "com.drivesense.drivesense.app-debug-43:/drawable_status_background.xml.flat",
+        "source": "com.drivesense.drivesense.app-main-45:/drawable/status_background.xml"
+    },
+    {
+        "merged": "C:\\Users\\anupk\\.gradle\\daemon\\8.7\\com.drivesense.drivesense.app-debug-43:\\layout_activity_main.xml.flat",
+        "source": "C:\\Users\\anupk\\.gradle\\daemon\\8.7\\com.drivesense.drivesense.app-main-45:\\layout\\activity_main.xml"
+    }
+]
