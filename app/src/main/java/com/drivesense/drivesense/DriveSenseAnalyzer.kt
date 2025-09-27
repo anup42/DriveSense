@@ -63,11 +63,16 @@ class DriveSenseAnalyzer(
         val leftEyeAspectRatio = computeEyeAspectRatio(primaryFace.getContour(FaceContour.LEFT_EYE)?.points)
         val rightEyeAspectRatio = computeEyeAspectRatio(primaryFace.getContour(FaceContour.RIGHT_EYE)?.points)
         val contourAvailable = leftEyeAspectRatio != null && rightEyeAspectRatio != null
-        val eyesClosedByContour = contourAvailable &&
-            leftEyeAspectRatio < EYE_ASPECT_CLOSED_THRESHOLD &&
-            rightEyeAspectRatio < EYE_ASPECT_CLOSED_THRESHOLD
-        val eyesOpenByContour = contourAvailable &&
-            (leftEyeAspectRatio >= EYE_ASPECT_OPEN_THRESHOLD || rightEyeAspectRatio >= EYE_ASPECT_OPEN_THRESHOLD)
+        val eyesClosedByContour = leftEyeAspectRatio?.let { leftRatio ->
+            rightEyeAspectRatio?.let { rightRatio ->
+                leftRatio < EYE_ASPECT_CLOSED_THRESHOLD && rightRatio < EYE_ASPECT_CLOSED_THRESHOLD
+            }
+        } ?: false
+        val eyesOpenByContour = leftEyeAspectRatio?.let { leftRatio ->
+            rightEyeAspectRatio?.let { rightRatio ->
+                leftRatio >= EYE_ASPECT_OPEN_THRESHOLD || rightRatio >= EYE_ASPECT_OPEN_THRESHOLD
+            }
+        } ?: false
 
         if (!classificationAvailable && !contourAvailable) {
             lastEyesClosedAt = NO_TIMESTAMP
