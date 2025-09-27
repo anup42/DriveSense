@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">DriveSense</string>
+    <string name="status_initializing">Initializing camera...</string>
+    <string name="status_searching">Searching for driver...</string>
+    <string name="status_attentive">Eyes detected: Awake</string>
+    <string name="status_drowsy">Eyes closed! Stay alert!</string>
+    <string name="status_permission_denied">Camera permission required to monitor alertness.</string>
+    <string name="event_placeholder">No events yet</string>
+    <string name="event_last_alert">Last alert: %1$s</string>
+    <string name="status_error">Camera offline. Please restart DriveSense.</string>
+</resources>
