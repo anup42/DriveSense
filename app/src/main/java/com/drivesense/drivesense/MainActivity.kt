@@ -56,6 +56,15 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+    private val activityRecognitionPermissionLauncher =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+            if (granted) {
+                drivingStatusMonitor.start()
+            } else {
+                drivingStatusMonitor.handlePermissionDenied()
+            }
+        }
+
     private val mainThreadExecutor: Executor by lazy { ContextCompat.getMainExecutor(this) }
     private val settings by lazy { getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE) }
 
@@ -78,6 +87,9 @@ class MainActivity : AppCompatActivity() {
             requireDrivingCheck = isChecked
             settings.edit { putBoolean(KEY_REQUIRE_DRIVING_CHECK, isChecked) }
             renderDriverState()
+            if (isChecked) {
+                ensureDrivingStatusMonitorStarted()
+            }
         }
         updateDrivingStatusUi()
 
@@ -92,7 +104,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
-        drivingStatusMonitor.start()
+        ensureDrivingStatusMonitorStarted()
     }
 
     override fun onPause() {
@@ -244,6 +256,16 @@ class MainActivity : AppCompatActivity() {
         drivingDetectionStatus = status
         updateDrivingStatusUi()
         renderDriverState()
+    }
+
+    private fun ensureDrivingStatusMonitorStarted() {
+        if (!DrivingStatusMonitor.hasActivityRecognitionPermission(this)) {
+            if (requireDrivingCheck && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                activityRecognitionPermissionLauncher.launch(Manifest.permission.ACTIVITY_RECOGNITION)
+                return
+            }
+        }
+        drivingStatusMonitor.start()
     }
 
     private fun updateDrivingStatusUi() {
