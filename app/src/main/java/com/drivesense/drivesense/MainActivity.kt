@@ -61,6 +61,8 @@ class MainActivity : AppCompatActivity() {
     private var latestDriverState: DriverState = DriverState.Initializing
     private val frontCameraLifecycleOwner = ManualLifecycleOwner()
     private val rearCameraLifecycleOwner = ManualLifecycleOwner()
+    private var supportsConcurrentCameras: Boolean = false
+    private var suppressRoadDetectionSwitchChange = false
 
     private val permissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
@@ -114,6 +116,13 @@ class MainActivity : AppCompatActivity() {
 
         binding.roadDetectionSwitch.isChecked = roadDetectionEnabled
         binding.roadDetectionSwitch.setOnCheckedChangeListener { _, isChecked ->
+            if (suppressRoadDetectionSwitchChange) {
+                return@setOnCheckedChangeListener
+            }
+            if (!supportsConcurrentCameras && isChecked) {
+                setRoadDetectionSwitchChecked(false)
+                return@setOnCheckedChangeListener
+            }
             roadDetectionEnabled = isChecked
             settings.edit { putBoolean(KEY_ROAD_DETECTION_ENABLED, isChecked) }
             if (!isChecked) {
@@ -175,7 +184,10 @@ class MainActivity : AppCompatActivity() {
         val future = ProcessCameraProvider.getInstance(this)
         future.addListener({
             try {
-                cameraProvider = future.get()
+                val provider = future.get()
+                cameraProvider = provider
+                supportsConcurrentCameras = provider.isConcurrentCameraModeSupported
+                updateConcurrentCameraAvailability()
                 bindUseCases()
             } catch (exception: Exception) {
                 handleDriverState(DriverState.Error(exception.localizedMessage ?: getString(R.string.status_error)))
@@ -223,6 +235,16 @@ class MainActivity : AppCompatActivity() {
         } catch (exception: Exception) {
             handleDriverState(DriverState.Error(exception.localizedMessage ?: getString(R.string.status_error)))
         }
+
+        if (!supportsConcurrentCameras) {
+            roadObjectAnalyzer = null
+            releaseRoadObjectDetector()
+            binding.rearOverlay.clearDetections()
+            updateRearCameraUiVisibility(false)
+            return
+        }
+
+        updateRearCameraUiVisibility(true)
 
         val rearPreview = Preview.Builder()
             .setTargetAspectRatio(AspectRatio.RATIO_4_3)
@@ -423,6 +445,27 @@ class MainActivity : AppCompatActivity() {
     private fun releaseRoadObjectDetector() {
         roadObjectDetector?.close()
         roadObjectDetector = null
+    }
+
+    private fun updateConcurrentCameraAvailability() {
+        binding.roadDetectionSwitch.isEnabled = supportsConcurrentCameras
+        if (!supportsConcurrentCameras && roadDetectionEnabled) {
+            roadDetectionEnabled = false
+            settings.edit { putBoolean(KEY_ROAD_DETECTION_ENABLED, false) }
+            setRoadDetectionSwitchChecked(false)
+        }
+    }
+
+    private fun setRoadDetectionSwitchChecked(checked: Boolean) {
+        if (binding.roadDetectionSwitch.isChecked == checked) return
+        suppressRoadDetectionSwitchChange = true
+        binding.roadDetectionSwitch.isChecked = checked
+        suppressRoadDetectionSwitchChange = false
+    }
+
+    private fun updateRearCameraUiVisibility(showRearPreview: Boolean) {
+        binding.rearPreviewContainer.visibility = if (showRearPreview) View.VISIBLE else View.GONE
+        binding.midGuideline.setGuidelinePercent(if (showRearPreview) 0.5f else 1f)
     }
 
     companion object {
