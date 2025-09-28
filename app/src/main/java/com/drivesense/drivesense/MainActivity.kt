@@ -30,10 +30,6 @@ import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.core.content.ContextCompat
 import androidx.core.content.edit
-import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.LifecycleOwner
-import androidx.lifecycle.LifecycleRegistry
-import androidx.lifecycle.Lifecycle.Event
 import com.drivesense.drivesense.databinding.ActivityMainBinding
 import com.drivesense.drivesense.ui.DetectionOverlayView.RoadObjectDetection
 import com.google.mlkit.vision.face.FaceDetection
@@ -66,8 +62,6 @@ class MainActivity : AppCompatActivity() {
     private var requireDrivingCheck: Boolean = true
     private var roadDetectionEnabled: Boolean = false
     private var latestDriverState: DriverState = DriverState.Initializing
-    private val frontCameraLifecycleOwner = ManualLifecycleOwner()
-    private val rearCameraLifecycleOwner = ManualLifecycleOwner()
     private var supportsConcurrentCameras: Boolean = false
     private var suppressRoadDetectionSwitchChange = false
     private var concurrentFrontCameraId: String? = null
@@ -98,9 +92,6 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
-
-        frontCameraLifecycleOwner.onCreate()
-        rearCameraLifecycleOwner.onCreate()
 
         binding.frontViewFinder.implementationMode =
             PreviewView.ImplementationMode.COMPATIBLE
@@ -158,16 +149,8 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    override fun onStart() {
-        super.onStart()
-        frontCameraLifecycleOwner.onStart()
-        rearCameraLifecycleOwner.onStart()
-    }
-
     override fun onResume() {
         super.onResume()
-        frontCameraLifecycleOwner.onResume()
-        rearCameraLifecycleOwner.onResume()
         ensureDrivingStatusMonitorStarted()
         if (hasCameraPermission()) {
             bindUseCases()
@@ -176,15 +159,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onPause() {
         super.onPause()
-        frontCameraLifecycleOwner.onPause()
-        rearCameraLifecycleOwner.onPause()
         drivingStatusMonitor.stop()
-    }
-
-    override fun onStop() {
-        super.onStop()
-        frontCameraLifecycleOwner.onStop()
-        rearCameraLifecycleOwner.onStop()
     }
 
     override fun onDestroy() {
@@ -192,8 +167,6 @@ class MainActivity : AppCompatActivity() {
         releaseCamera()
         cameraExecutor.shutdown()
         toneGenerator?.release()
-        rearCameraLifecycleOwner.onDestroy()
-        frontCameraLifecycleOwner.onDestroy()
     }
 
     private fun hasCameraPermission(): Boolean {
@@ -261,10 +234,13 @@ class MainActivity : AppCompatActivity() {
             Rational(previewView.width, previewView.height),
             previewView.display?.rotation ?: Surface.ROTATION_0
         )
-        if (supportsConcurrentCameras) {
-            builder.setConcurrentCameraModeCompat()
-        }
-        return builder.build()
+        return builder
+            .apply {
+                if (supportsConcurrentCameras) {
+                    setCameraMode(ViewPort.CameraMode.CONCURRENT)
+                }
+            }
+            .build()
     }
 
     private fun bindUseCasesInternal(provider: ProcessCameraProvider) {
@@ -323,7 +299,7 @@ class MainActivity : AppCompatActivity() {
             binding.rearOverlay.clearDetections()
             updateRearCameraUiVisibility(false)
             try {
-                frontCamera = provider.bindToLifecycle(frontCameraLifecycleOwner, frontCameraSelector, frontGroup)
+                frontCamera = provider.bindToLifecycle(this@MainActivity, frontCameraSelector, frontGroup)
             } catch (exception: Exception) {
                 handleDriverState(DriverState.Error(exception.localizedMessage ?: getString(R.string.status_error)))
             }
@@ -376,7 +352,7 @@ class MainActivity : AppCompatActivity() {
         var rearCameraBound = false
         var roadDetectionFallbackAttempted = false
         try {
-            rearCamera = provider.bindToLifecycle(rearCameraLifecycleOwner, rearCameraSelector, rearGroup)
+            rearCamera = provider.bindToLifecycle(this@MainActivity, rearCameraSelector, rearGroup)
             rearCameraBound = true
         } catch (exception: Exception) {
             Log.w(TAG, "Failed to bind rear camera use cases", exception)
@@ -390,7 +366,7 @@ class MainActivity : AppCompatActivity() {
                     .setViewPort(rearViewport)
                     .build()
                 try {
-                    rearCamera = provider.bindToLifecycle(rearCameraLifecycleOwner, rearCameraSelector, fallbackRearGroup)
+                    rearCamera = provider.bindToLifecycle(this@MainActivity, rearCameraSelector, fallbackRearGroup)
                     rearCameraBound = true
                 } catch (fallbackException: Exception) {
                     Log.e(TAG, "Failed to bind rear camera preview only fallback", fallbackException)
@@ -403,7 +379,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         try {
-            frontCamera = provider.bindToLifecycle(frontCameraLifecycleOwner, frontCameraSelector, frontGroup)
+            frontCamera = provider.bindToLifecycle(this@MainActivity, frontCameraSelector, frontGroup)
         } catch (exception: Exception) {
             handleDriverState(DriverState.Error(exception.localizedMessage ?: getString(R.string.status_error)))
         }
@@ -554,22 +530,6 @@ class MainActivity : AppCompatActivity() {
         roadObjectAnalyzer = null
         releaseRoadObjectDetector()
         binding.rearOverlay.clearDetections()
-    }
-
-    private fun ViewPort.Builder.setConcurrentCameraModeCompat() {
-        try {
-            val cameraModeClass = Class.forName("androidx.camera.core.ViewPort\$CameraMode")
-            val concurrentField = cameraModeClass.getField("CONCURRENT")
-            val concurrentValue = concurrentField.get(null)
-            val method = ViewPort.Builder::class.java.getMethod("setCameraMode", cameraModeClass)
-            method.invoke(this, concurrentValue)
-        } catch (ignored: ClassNotFoundException) {
-            Log.w(TAG, "CameraMode class unavailable; cannot request concurrent camera mode")
-        } catch (ignored: NoSuchMethodException) {
-            Log.w(TAG, "setCameraMode not available; cannot request concurrent camera mode")
-        } catch (error: Throwable) {
-            Log.w(TAG, "Unexpected error while requesting concurrent camera mode", error)
-        }
     }
 
     private fun ProcessCameraProvider.isConcurrentCameraModeSupportedCompat(): Boolean {
@@ -731,37 +691,6 @@ class MainActivity : AppCompatActivity() {
         private const val KEY_REQUIRE_DRIVING_CHECK = "require_driving_check"
         private const val KEY_ROAD_DETECTION_ENABLED = "road_detection_enabled"
         private val TARGET_RESOLUTION = Size(1280, 960)
-    }
-}
-
-private class ManualLifecycleOwner : LifecycleOwner {
-    private val lifecycleRegistry = LifecycleRegistry(this)
-
-    override val lifecycle: Lifecycle
-        get() = lifecycleRegistry
-
-    fun onCreate() {
-        lifecycleRegistry.handleLifecycleEvent(Event.ON_CREATE)
-    }
-
-    fun onStart() {
-        lifecycleRegistry.handleLifecycleEvent(Event.ON_START)
-    }
-
-    fun onResume() {
-        lifecycleRegistry.handleLifecycleEvent(Event.ON_RESUME)
-    }
-
-    fun onPause() {
-        lifecycleRegistry.handleLifecycleEvent(Event.ON_PAUSE)
-    }
-
-    fun onStop() {
-        lifecycleRegistry.handleLifecycleEvent(Event.ON_STOP)
-    }
-
-    fun onDestroy() {
-        lifecycleRegistry.handleLifecycleEvent(Event.ON_DESTROY)
     }
 }
 
