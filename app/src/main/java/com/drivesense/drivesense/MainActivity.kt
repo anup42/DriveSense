@@ -558,7 +558,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun ViewPort.Builder.setConcurrentCameraModeCompat() {
         try {
-            val cameraModeClass = Class.forName("androidx.camera.core.ViewPort$CameraMode")
+            val cameraModeClass = Class.forName("androidx.camera.core.ViewPort\$CameraMode")
             val concurrentField = cameraModeClass.getField("CONCURRENT")
             val concurrentValue = concurrentField.get(null)
             val method = ViewPort.Builder::class.java.getMethod("setCameraMode", cameraModeClass)
