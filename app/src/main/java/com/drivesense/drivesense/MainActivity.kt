@@ -13,6 +13,7 @@ import android.os.SystemClock
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.util.Log
+import android.util.Rational
 import android.util.Size
 import android.view.Surface
 import android.view.View
@@ -297,10 +298,9 @@ class MainActivity : AppCompatActivity() {
         imageAnalysis.setAnalyzer(cameraExecutor, analyzer!!)
 
         val frontViewport = ViewPort.Builder(
-            binding.frontViewFinder.width,
-            binding.frontViewFinder.height,
+            Rational(binding.frontViewFinder.width, binding.frontViewFinder.height),
             binding.frontViewFinder.display?.rotation ?: Surface.ROTATION_0
-        ).setAspectRatio(AspectRatio.RATIO_4_3).build()
+        ).build()
 
         val frontGroup = UseCaseGroup.Builder()
             .addUseCase(frontPreview)
@@ -341,10 +341,9 @@ class MainActivity : AppCompatActivity() {
         val rearCameraSelector = getRearCameraSelector()
 
         val rearViewport = ViewPort.Builder(
-            binding.rearViewFinder.width,
-            binding.rearViewFinder.height,
+            Rational(binding.rearViewFinder.width, binding.rearViewFinder.height),
             binding.rearViewFinder.display?.rotation ?: Surface.ROTATION_0
-        ).setAspectRatio(AspectRatio.RATIO_4_3).build()
+        ).build()
 
         val rearGroupBuilder = UseCaseGroup.Builder()
             .addUseCase(rearPreview)
