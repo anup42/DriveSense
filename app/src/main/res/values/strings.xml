@@ -7,12 +7,18 @@
     <string name="status_drowsy">Eyes closed! Stay alert!</string>
     <string name="status_permission_denied">Camera permission required to monitor alertness.</string>
     <string name="event_placeholder">No events yet</string>
-    <string name="event_last_alert">Last alert: %1$s</string>
+    <string name="event_last_alert">Driver alert: %1$s</string>
+    <string name="event_road_alert">Road alert (%1$s): %2$s</string>
     <string name="status_error">Camera offline. Please restart DriveSense.</string>
     <string name="label_require_driving">Require driving detection</string>
-    <string name="status_waiting_for_driving">Waiting for vehicle motion…</string>
+    <string name="label_enable_road_detection">Enable road object alerts</string>
+    <string name="status_waiting_for_driving">Waiting for vehicle motion...</string>
     <string name="status_driving_detection_unavailable">Driving detection unavailable. Disable the driving check to continue.</string>
     <string name="status_driving_detected">Driving detected</string>
     <string name="status_not_moving">Vehicle stationary</string>
-    <string name="status_driving_unknown">Detecting driving status…</string>
+    <string name="status_driving_unknown">Detecting driving status...</string>
+    <string name="alert_reason_pedestrian">Pedestrian ahead</string>
+    <string name="alert_reason_animal">Animal on road</string>
+    <string name="fps_placeholder">FPS: --</string>
+    <string name="fps_value">FPS: %1$.1f</string>
 </resources>

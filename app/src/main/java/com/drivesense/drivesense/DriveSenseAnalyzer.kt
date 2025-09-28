@@ -1,13 +1,8 @@
 package com.drivesense.drivesense
 
-import android.content.Context
 import android.graphics.Bitmap
-import android.graphics.BitmapFactory
-import android.graphics.ImageFormat
-import android.graphics.Matrix
+import android.content.Context
 import android.graphics.PointF
-import android.graphics.Rect
-import android.graphics.YuvImage
 import android.os.SystemClock
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
@@ -20,7 +15,6 @@ import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.face.Face
 import com.google.mlkit.vision.face.FaceContour
 import com.google.mlkit.vision.face.FaceDetector
-import java.io.ByteArrayOutputStream
 import java.util.concurrent.Executor
 import kotlin.LazyThreadSafetyMode
 import kotlin.math.abs
@@ -31,6 +25,7 @@ class DriveSenseAnalyzer(
     private val detector: FaceDetector,
     private val mainExecutor: Executor,
     private val onStateUpdated: (DriverState) -> Unit,
+    private val onFrameProcessed: (() -> Unit)? = null,
     private val closedEyesThresholdMs: Long = 1500L,
     private val minEyeOpenProbability: Float = 0.4f
 ) : ImageAnalysis.Analyzer {
@@ -74,7 +69,7 @@ class DriveSenseAnalyzer(
         val rotationDegrees = imageProxy.imageInfo.rotationDegrees
         val inputImage = InputImage.fromMediaImage(mediaImage, rotationDegrees)
         val mediaPipeMetrics = runCatching {
-            imageProxyToBitmap(imageProxy)?.let { detectWithMediaPipe(it) }
+            imageProxy.toBitmap()?.let { detectWithMediaPipe(it) }
         }.getOrNull()
         detector.process(inputImage)
             .addOnSuccessListener { faces ->
@@ -85,6 +80,7 @@ class DriveSenseAnalyzer(
                 publishState(DriverState.Error(error.localizedMessage ?: "Face detector error"))
             }
             .addOnCompleteListener {
+                onFrameProcessed?.invoke()
                 imageProxy.close()
             }
     }
@@ -309,64 +305,6 @@ class DriveSenseAnalyzer(
         return t * t * (3f - 2f * t)
     }
 
-    private fun imageProxyToBitmap(image: ImageProxy): Bitmap? {
-        val planes = image.planes
-        if (planes.size < 3) return null
-
-        val yBuffer = planes[0].buffer
-        val uBuffer = planes[1].buffer
-        val vBuffer = planes[2].buffer
-
-        val ySize = yBuffer.remaining()
-        val uSize = uBuffer.remaining()
-        val vSize = vBuffer.remaining()
-
-        val nv21 = ByteArray(ySize + uSize + vSize)
-        yBuffer.get(nv21, 0, ySize)
-
-        val pixelStride = planes[2].pixelStride
-        val rowStride = planes[2].rowStride
-        val width = image.width
-        val height = image.height
-        var offset = ySize
-
-        if (pixelStride == 2 && rowStride == width) {
-            vBuffer.get(nv21, offset, vSize)
-            offset += vSize
-            uBuffer.get(nv21, offset, uSize)
-        } else {
-            val vBytes = ByteArray(vSize)
-            val uBytes = ByteArray(uSize)
-            vBuffer.get(vBytes)
-            uBuffer.get(uBytes)
-            for (row in 0 until height / 2) {
-                for (col in 0 until width / 2) {
-                    val vuIndex = row * rowStride + col * pixelStride
-                    nv21[offset++] = vBytes[vuIndex]
-                    nv21[offset++] = uBytes[vuIndex]
-                }
-            }
-        }
-
-        yBuffer.rewind()
-        uBuffer.rewind()
-        vBuffer.rewind()
-
-        val yuvImage = YuvImage(nv21, ImageFormat.NV21, width, height, null)
-        val out = ByteArrayOutputStream()
-        yuvImage.compressToJpeg(Rect(0, 0, width, height), 90, out)
-        val jpegBytes = out.toByteArray()
-        val bitmap = BitmapFactory.decodeByteArray(jpegBytes, 0, jpegBytes.size) ?: return null
-        return bitmap.rotate(image.imageInfo.rotationDegrees)
-    }
-
-    private fun Bitmap.rotate(degrees: Int): Bitmap {
-        if (degrees == 0) return this
-        val matrix = Matrix()
-        matrix.postRotate(degrees.toFloat())
-        return Bitmap.createBitmap(this, 0, 0, width, height, matrix, true)
-    }
-
     private fun resetMediaPipeFilters() {
         mediaPipeLeftEarFilter.reset()
         mediaPipeRightEarFilter.reset()
@@ -467,3 +405,4 @@ private class ExponentialMovingAverage(private val alpha: Float) {
         value = null
     }
 }
+

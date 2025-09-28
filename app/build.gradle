@@ -47,6 +47,9 @@ android {
 def faceLandmarkerModelUrl = 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/latest/face_landmarker.task'
 def faceLandmarkerModelPath = "${projectDir}/src/main/assets/face_landmarker.task"
 
+def objectDetectorModelUrl = 'https://storage.googleapis.com/mediapipe-models/object_detector/efficientdet_lite0/float16/latest/efficientdet_lite0.tflite'
+def objectDetectorModelPath = "${projectDir}/src/main/assets/efficientdet_lite0.tflite"
+
 tasks.register('downloadFaceLandmarkerModel') {
     outputs.file(faceLandmarkerModelPath)
     doLast {
@@ -72,7 +75,32 @@ tasks.register('downloadFaceLandmarkerModel') {
     }
 }
 
-preBuild.dependsOn downloadFaceLandmarkerModel
+tasks.register('downloadObjectDetectorModel') {
+    outputs.file(objectDetectorModelPath)
+    doLast {
+        def destination = file(objectDetectorModelPath)
+        if (destination.exists()) {
+            logger.lifecycle("MediaPipe Object Detector model already present at ${destination}")
+            return
+        }
+
+        destination.parentFile.mkdirs()
+        logger.lifecycle("Downloading MediaPipe Object Detector model from ${objectDetectorModelUrl}")
+        try {
+            new URL(objectDetectorModelUrl).withInputStream { input ->
+                destination.withOutputStream { output ->
+                    output << input
+                }
+            }
+            logger.lifecycle("Saved MediaPipe Object Detector model to ${destination}")
+        } catch (Exception exception) {
+            destination.delete()
+            throw new GradleException("Unable to download MediaPipe Object Detector model", exception)
+        }
+    }
+}
+
+preBuild.dependsOn downloadFaceLandmarkerModel, downloadObjectDetectorModel
 
 dependencies {
     implementation 'androidx.core:core-ktx:1.13.1'

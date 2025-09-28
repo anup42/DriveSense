@@ -1,7 +1,7 @@
 # Gradle builds
 .gradle/
 build/
-app/build/
+app/build/*
 
 # IDE files
 *.iml

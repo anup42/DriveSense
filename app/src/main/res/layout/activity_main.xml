@@ -7,15 +7,73 @@
     android:background="@android:color/black"
     tools:context=".MainActivity">
 
-    <androidx.camera.view.PreviewView
-        android:id="@+id/viewFinder"
+    <LinearLayout
+        android:id="@+id/previewContainer"
         android:layout_width="0dp"
         android:layout_height="0dp"
-        android:keepScreenOn="true"
+        android:orientation="vertical"
         app:layout_constraintBottom_toBottomOf="parent"
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintTop_toTopOf="parent" />
+        app:layout_constraintTop_toTopOf="parent">
+
+        <FrameLayout
+            android:id="@+id/frontPreviewContainer"
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_weight="1">
+
+            <androidx.camera.view.PreviewView
+                android:id="@+id/frontPreviewView"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:keepScreenOn="true" />
+
+            <TextView
+                android:id="@+id/frontFpsText"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_gravity="top|end"
+                android:layout_margin="12dp"
+                android:background="@drawable/status_background"
+                android:paddingHorizontal="12dp"
+                android:paddingVertical="6dp"
+                android:text="@string/fps_placeholder"
+                android:textColor="@android:color/white"
+                android:textSize="14sp" />
+        </FrameLayout>
+
+        <FrameLayout
+            android:id="@+id/rearPreviewContainer"
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_weight="1">
+
+            <androidx.camera.view.PreviewView
+                android:id="@+id/rearPreviewView"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:keepScreenOn="true" />
+
+            <com.drivesense.drivesense.RoadObjectOverlayView
+                android:id="@+id/roadObjectOverlay"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent" />
+
+            <TextView
+                android:id="@+id/rearFpsText"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_gravity="top|end"
+                android:layout_margin="12dp"
+                android:background="@drawable/status_background"
+                android:paddingHorizontal="12dp"
+                android:paddingVertical="6dp"
+                android:text="@string/fps_placeholder"
+                android:textColor="@android:color/white"
+                android:textSize="14sp" />
+        </FrameLayout>
+    </LinearLayout>
 
     <TextView
         android:id="@+id/statusText"
@@ -44,6 +102,18 @@
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintTop_toBottomOf="@id/statusText" />
 
+    <com.google.android.material.switchmaterial.SwitchMaterial
+        android:id="@+id/roadDetectionSwitch"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginHorizontal="16dp"
+        android:layout_marginTop="8dp"
+        android:text="@string/label_enable_road_detection"
+        android:textColor="@android:color/white"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toBottomOf="@id/drivingCheckSwitch" />
+
     <TextView
         android:id="@+id/drivingStatusText"
         android:layout_width="wrap_content"
@@ -58,7 +128,7 @@
         android:textColor="@android:color/white"
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintTop_toBottomOf="@id/drivingCheckSwitch" />
+        app:layout_constraintTop_toBottomOf="@id/roadDetectionSwitch" />
 
     <TextView
         android:id="@+id/lastEventText"

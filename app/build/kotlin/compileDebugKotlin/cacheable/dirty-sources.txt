@@ -1,3 +1,0 @@
-C:\Users\anupk\Documents\DriveSense\app\src\main\java\com\drivesense\drivesense\DriveSenseAnalyzer.kt
-C:\Users\anupk\Documents\DriveSense\app\src\main\java\com\drivesense\drivesense\DriverState.kt
-C:\Users\anupk\Documents\DriveSense\app\src\main\java\com\drivesense\drivesense\MainActivity.kt

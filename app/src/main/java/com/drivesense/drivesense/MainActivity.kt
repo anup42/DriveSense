@@ -12,6 +12,7 @@ import android.os.VibrationEffect
 import android.os.Vibrator
 import android.view.Surface
 import android.view.View
+import android.widget.TextView
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.camera.core.AspectRatio
@@ -19,6 +20,7 @@ import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
+import androidx.camera.view.PreviewView
 import androidx.core.content.ContextCompat
 import androidx.core.content.edit
 import com.drivesense.drivesense.databinding.ActivityMainBinding
@@ -39,13 +41,18 @@ class MainActivity : AppCompatActivity() {
 
     private var cameraProvider: ProcessCameraProvider? = null
     private var faceDetector: FaceDetector? = null
-    private var analyzer: DriveSenseAnalyzer? = null
+    private var frontAnalyzer: DriveSenseAnalyzer? = null
+    private var rearAnalyzer: RoadObjectAnalyzer? = null
     private var toneGenerator: ToneGenerator? = null
     private var lastAlertTimestamp: Long = 0L
     private lateinit var drivingStatusMonitor: DrivingStatusMonitor
     private var drivingDetectionStatus: DrivingDetectionStatus = DrivingDetectionStatus.UNKNOWN
     private var requireDrivingCheck: Boolean = true
     private var latestDriverState: DriverState = DriverState.Initializing
+    private var isRoadDetectionEnabled: Boolean = true
+
+    private val frontFpsTracker = FpsTracker()
+    private val rearFpsTracker = FpsTracker()
 
     private val permissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
@@ -75,7 +82,16 @@ class MainActivity : AppCompatActivity() {
 
         cameraExecutor = Executors.newSingleThreadExecutor()
         binding.lastEventText.visibility = View.GONE
+        binding.frontFpsText.text = getString(R.string.fps_placeholder)
+        binding.rearFpsText.text = getString(R.string.fps_placeholder)
+        binding.frontPreviewView.scaleType = PreviewView.ScaleType.FIT_CENTER
+        binding.rearPreviewView.scaleType = PreviewView.ScaleType.FIT_CENTER
+        binding.frontPreviewView.implementationMode = PreviewView.ImplementationMode.COMPATIBLE
+        binding.rearPreviewView.implementationMode = PreviewView.ImplementationMode.COMPATIBLE
+
         requireDrivingCheck = settings.getBoolean(KEY_REQUIRE_DRIVING_CHECK, true)
+        isRoadDetectionEnabled = settings.getBoolean(KEY_ROAD_DETECTION_ENABLED, true)
+
         drivingStatusMonitor = DrivingStatusMonitor(
             context = this,
             callbackExecutor = mainThreadExecutor,
@@ -91,8 +107,18 @@ class MainActivity : AppCompatActivity() {
                 ensureDrivingStatusMonitorStarted()
             }
         }
-        updateDrivingStatusUi()
 
+        binding.roadDetectionSwitch.isChecked = isRoadDetectionEnabled
+        binding.roadDetectionSwitch.setOnCheckedChangeListener { _, isChecked ->
+            isRoadDetectionEnabled = isChecked
+            settings.edit { putBoolean(KEY_ROAD_DETECTION_ENABLED, isChecked) }
+            rearAnalyzer?.detectionEnabled = isChecked
+            if (!isChecked) {
+                binding.roadObjectOverlay.render(null)
+            }
+        }
+
+        updateDrivingStatusUi()
         handleDriverState(DriverState.Initializing)
 
         if (hasCameraPermission()) {
@@ -139,12 +165,21 @@ class MainActivity : AppCompatActivity() {
     private fun bindUseCases() {
         val provider = cameraProvider ?: return
         provider.unbindAll()
+        frontFpsTracker.reset()
+        rearFpsTracker.reset()
+        binding.frontFpsText.text = getString(R.string.fps_placeholder)
+        binding.rearFpsText.text = getString(R.string.fps_placeholder)
 
+        bindFrontCamera(provider)
+        bindRearCamera(provider)
+    }
+
+    private fun bindFrontCamera(provider: ProcessCameraProvider) {
         val preview = Preview.Builder()
             .setTargetAspectRatio(AspectRatio.RATIO_4_3)
-            .setTargetRotation(binding.viewFinder.display?.rotation ?: Surface.ROTATION_0)
+            .setTargetRotation(binding.frontPreviewView.display?.rotation ?: Surface.ROTATION_0)
             .build()
-            .also { it.setSurfaceProvider(binding.viewFinder.surfaceProvider) }
+            .also { it.setSurfaceProvider(binding.frontPreviewView.surfaceProvider) }
 
         val detectorOptions = FaceDetectorOptions.Builder()
             .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_ACCURATE)
@@ -157,20 +192,80 @@ class MainActivity : AppCompatActivity() {
         faceDetector?.close()
         faceDetector = FaceDetection.getClient(detectorOptions)
 
-        val imageAnalysis = ImageAnalysis.Builder()
+        val analysis = ImageAnalysis.Builder()
             .setTargetAspectRatio(AspectRatio.RATIO_4_3)
             .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
             .build()
 
-        analyzer = DriveSenseAnalyzer(
+        val analyzer = DriveSenseAnalyzer(
             context = applicationContext,
             detector = faceDetector!!,
             mainExecutor = mainThreadExecutor,
-            onStateUpdated = ::handleDriverState
+            onStateUpdated = ::handleDriverState,
+            onFrameProcessed = ::onFrontFrameProcessed
         )
-        imageAnalysis.setAnalyzer(cameraExecutor, analyzer!!)
+        frontAnalyzer = analyzer
+        analysis.setAnalyzer(cameraExecutor, analyzer)
 
-        provider.bindToLifecycle(this, CameraSelector.DEFAULT_FRONT_CAMERA, preview, imageAnalysis)
+        provider.bindToLifecycle(this, CameraSelector.DEFAULT_FRONT_CAMERA, preview, analysis)
+    }
+
+    private fun bindRearCamera(provider: ProcessCameraProvider) {
+        val preview = Preview.Builder()
+            .setTargetAspectRatio(AspectRatio.RATIO_4_3)
+            .setTargetRotation(binding.rearPreviewView.display?.rotation ?: Surface.ROTATION_0)
+            .build()
+            .also { it.setSurfaceProvider(binding.rearPreviewView.surfaceProvider) }
+
+        val analysis = ImageAnalysis.Builder()
+            .setTargetAspectRatio(AspectRatio.RATIO_4_3)
+            .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+            .build()
+
+        val analyzer = RoadObjectAnalyzer(
+            context = applicationContext,
+            callbackExecutor = mainThreadExecutor,
+            onDetectionsUpdated = ::onRoadDetectionsUpdated,
+            onFrameProcessed = ::onRearFrameProcessed
+        ).also { it.detectionEnabled = isRoadDetectionEnabled }
+
+        try {
+            analysis.setAnalyzer(cameraExecutor, analyzer)
+            provider.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, preview, analysis)
+            rearAnalyzer = analyzer
+            binding.roadDetectionSwitch.isEnabled = true
+        } catch (exception: Exception) {
+            analysis.clearAnalyzer()
+            analyzer.close()
+            rearAnalyzer = null
+            binding.roadDetectionSwitch.isEnabled = false
+            if (isRoadDetectionEnabled) {
+                isRoadDetectionEnabled = false
+                binding.roadDetectionSwitch.isChecked = false
+                settings.edit { putBoolean(KEY_ROAD_DETECTION_ENABLED, false) }
+            }
+            binding.roadObjectOverlay.render(null)
+            binding.rearFpsText.text = getString(R.string.fps_placeholder)
+        }
+    }
+
+    private fun onFrontFrameProcessed() {
+        val fps = frontFpsTracker.tick()
+        mainThreadExecutor.execute { updateFpsLabel(binding.frontFpsText, fps) }
+    }
+
+    private fun onRearFrameProcessed() {
+        val fps = rearFpsTracker.tick()
+        mainThreadExecutor.execute { updateFpsLabel(binding.rearFpsText, fps) }
+    }
+
+    private fun updateFpsLabel(textView: TextView, fps: Double) {
+        val text = if (fps <= 0.5) {
+            getString(R.string.fps_placeholder)
+        } else {
+            getString(R.string.fps_value, fps)
+        }
+        textView.text = text
     }
 
     private fun handleDriverState(state: DriverState) {
@@ -216,7 +311,7 @@ class MainActivity : AppCompatActivity() {
                 val secondsClosed = state.closedDurationMs / 1000f
                 val message = getString(R.string.status_drowsy) + String.format(Locale.US, " (%.1fs)", secondsClosed)
                 setStatus(message, R.color.status_drowsy)
-                triggerAlerts()
+                triggerDriverAlert()
             }
             else -> Unit
         }
@@ -227,22 +322,40 @@ class MainActivity : AppCompatActivity() {
         binding.statusText.setTextColor(ContextCompat.getColor(this, colorResId))
     }
 
-    private fun triggerAlerts() {
+    private fun triggerDriverAlert() {
+        emitAlert { formattedTime -> getString(R.string.event_last_alert, formattedTime) }
+    }
+
+    private fun maybeTriggerRoadAlert(reason: String) {
+        emitAlert { formattedTime -> getString(R.string.event_road_alert, reason, formattedTime) }
+    }
+
+    private fun emitAlert(messageFactory: (String) -> String) {
         val now = SystemClock.elapsedRealtime()
         if (now - lastAlertTimestamp < ALERT_COOLDOWN_MS) {
             return
         }
         lastAlertTimestamp = now
-
         ensureToneGenerator().startTone(ToneGenerator.TONE_CDMA_ALERT_CALL_GUARD, ALERT_TONE_DURATION_MS.toInt())
         vibrate()
-        updateLastAlertLabel()
-    }
-
-    private fun updateLastAlertLabel() {
         val formattedTime = DateFormat.getTimeInstance(DateFormat.SHORT).format(Date())
         binding.lastEventText.visibility = View.VISIBLE
-        binding.lastEventText.text = getString(R.string.event_last_alert, formattedTime)
+        binding.lastEventText.text = messageFactory(formattedTime)
+    }
+
+    private fun onRoadDetectionsUpdated(result: RoadObjectDetectionResult?) {
+        binding.roadObjectOverlay.render(result)
+        if (!isRoadDetectionEnabled || result == null) {
+            return
+        }
+
+        val reasonRes = when {
+            result.detections.any { it.category == RoadObjectCategory.ANIMAL } -> R.string.alert_reason_animal
+            result.detections.any { it.category == RoadObjectCategory.PEDESTRIAN } -> R.string.alert_reason_pedestrian
+            else -> null
+        } ?: return
+
+        maybeTriggerRoadAlert(getString(reasonRes))
     }
 
     private fun ensureToneGenerator(): ToneGenerator {
@@ -290,8 +403,10 @@ class MainActivity : AppCompatActivity() {
 
     private fun releaseCamera() {
         cameraProvider?.unbindAll()
-        analyzer?.close()
-        analyzer = null
+        frontAnalyzer?.close()
+        frontAnalyzer = null
+        rearAnalyzer?.close()
+        rearAnalyzer = null
         faceDetector?.close()
         faceDetector = null
     }
@@ -303,12 +418,6 @@ class MainActivity : AppCompatActivity() {
         private const val TONE_VOLUME = 100
         private const val PREFS_NAME = "drivesense_settings"
         private const val KEY_REQUIRE_DRIVING_CHECK = "require_driving_check"
+        private const val KEY_ROAD_DETECTION_ENABLED = "road_detection_enabled"
     }
 }
-
-
-
-
-
-
-
