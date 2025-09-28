@@ -3,6 +3,8 @@ package com.drivesense.drivesense
 import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
+import android.hardware.camera2.CameraCharacteristics
+import android.hardware.camera2.CameraManager
 import android.media.AudioManager
 import android.media.ToneGenerator
 import android.os.Build
@@ -186,7 +188,7 @@ class MainActivity : AppCompatActivity() {
             try {
                 val provider = future.get()
                 cameraProvider = provider
-                supportsConcurrentCameras = provider.isConcurrentCameraModeSupportedCompat()
+                supportsConcurrentCameras = isConcurrentFrontBackCameraSupported()
                 updateConcurrentCameraAvailability()
                 bindUseCases()
             } catch (exception: Exception) {
@@ -432,27 +434,40 @@ class MainActivity : AppCompatActivity() {
         binding.rearOverlay.clearDetections()
     }
 
-    private fun ProcessCameraProvider.isConcurrentCameraModeSupportedCompat(): Boolean {
-        return try {
-            val method = ProcessCameraProvider::class.java.getMethod(
-                "isConcurrentCameraModeSupported",
-                CameraSelector::class.java,
-                CameraSelector::class.java
-            )
-            method.invoke(
-                this,
-                CameraSelector.DEFAULT_FRONT_CAMERA,
-                CameraSelector.DEFAULT_BACK_CAMERA
-            ) as Boolean
-        } catch (error: NoSuchMethodException) {
-            Log.w(TAG, "Concurrent camera mode support check unavailable", error)
-            false
-        } catch (error: NoSuchMethodError) {
-            Log.w(TAG, "Concurrent camera mode support check unavailable", error)
-            false
+    private fun isConcurrentFrontBackCameraSupported(): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+            return false
+        }
+        if (!packageManager.hasSystemFeature(PackageManager.FEATURE_CAMERA_CONCURRENT)) {
+            return false
+        }
+        val cameraManager = getSystemService(Context.CAMERA_SERVICE) as? CameraManager ?: return false
+        val concurrentSets = try {
+            cameraManager.concurrentCameraIds
         } catch (exception: Exception) {
-            Log.w(TAG, "Unable to query concurrent camera mode support", exception)
-            false
+            Log.w(TAG, "Unable to query concurrent camera combinations", exception)
+            return false
+        }
+        if (concurrentSets.isEmpty()) {
+            return false
+        }
+        return concurrentSets.any { cameraIdSet ->
+            var hasFront = false
+            var hasBack = false
+            for (cameraId in cameraIdSet) {
+                val facing = try {
+                    cameraManager.getCameraCharacteristics(cameraId)
+                        .get(CameraCharacteristics.LENS_FACING)
+                } catch (exception: Exception) {
+                    Log.w(TAG, "Unable to read camera characteristics for $cameraId", exception)
+                    return@any false
+                }
+                when (facing) {
+                    CameraCharacteristics.LENS_FACING_FRONT -> hasFront = true
+                    CameraCharacteristics.LENS_FACING_BACK -> hasBack = true
+                }
+            }
+            hasFront && hasBack
         }
     }
 
