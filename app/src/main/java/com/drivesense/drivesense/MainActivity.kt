@@ -13,16 +13,19 @@ import android.os.SystemClock
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.util.Log
+import android.util.Size
 import android.view.Surface
 import android.view.View
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.camera.camera2.interop.Camera2CameraInfo
 import androidx.camera.core.AspectRatio
+import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.Preview
-import androidx.camera.core.UseCase
+import androidx.camera.core.UseCaseGroup
+import androidx.camera.core.ViewPort
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.core.content.ContextCompat
 import androidx.core.content.edit
@@ -98,6 +101,15 @@ class MainActivity : AppCompatActivity() {
         frontCameraLifecycleOwner.onCreate()
         rearCameraLifecycleOwner.onCreate()
 
+        binding.frontViewFinder.preferredImplementationMode =
+            androidx.camera.view.PreviewView.ImplementationMode.COMPATIBLE
+        binding.frontViewFinder.scaleType =
+            androidx.camera.view.PreviewView.ScaleType.FILL_CENTER
+        binding.rearViewFinder.preferredImplementationMode =
+            androidx.camera.view.PreviewView.ImplementationMode.COMPATIBLE
+        binding.rearViewFinder.scaleType =
+            androidx.camera.view.PreviewView.ScaleType.FILL_CENTER
+
         cameraExecutor = Executors.newSingleThreadExecutor()
         binding.lastEventText.visibility = View.GONE
         requireDrivingCheck = settings.getBoolean(KEY_REQUIRE_DRIVING_CHECK, true)
@@ -156,6 +168,9 @@ class MainActivity : AppCompatActivity() {
         frontCameraLifecycleOwner.onResume()
         rearCameraLifecycleOwner.onResume()
         ensureDrivingStatusMonitorStarted()
+        if (hasCameraPermission()) {
+            bindUseCases()
+        }
     }
 
     override fun onPause() {
@@ -203,13 +218,58 @@ class MainActivity : AppCompatActivity() {
 
     private fun bindUseCases() {
         val provider = cameraProvider ?: return
+        if (!supportsConcurrentCameras) {
+            updateRearCameraUiVisibility(false)
+        } else {
+            updateRearCameraUiVisibility(true)
+        }
+        runWhenPreviewViewsReady {
+            bindUseCasesInternal(provider)
+        }
+    }
+
+    private fun runWhenPreviewViewsReady(action: () -> Unit) {
+        val frontReady = isPreviewViewReady(binding.frontViewFinder)
+        val rearRequired = supportsConcurrentCameras
+        val rearReady = !rearRequired || isPreviewViewReady(binding.rearViewFinder)
+        if (frontReady && rearReady) {
+            action()
+            return
+        }
+        binding.frontViewFinder.post {
+            val frontPostReady = isPreviewViewReady(binding.frontViewFinder)
+            val rearPostReady = !rearRequired || isPreviewViewReady(binding.rearViewFinder)
+            if (frontPostReady && rearPostReady) {
+                action()
+            } else if (rearRequired) {
+                binding.rearViewFinder.post {
+                    if (isPreviewViewReady(binding.frontViewFinder) && isPreviewViewReady(binding.rearViewFinder)) {
+                        action()
+                    }
+                }
+            }
+        }
+    }
+
+    private fun isPreviewViewReady(view: View): Boolean {
+        return view.width > 0 && view.height > 0
+    }
+
+    private fun bindUseCasesInternal(provider: ProcessCameraProvider) {
         provider.unbindAll()
 
+        val frontSurfaceProvider = binding.frontViewFinder.surfaceProvider
         val frontPreview = Preview.Builder()
             .setTargetAspectRatio(AspectRatio.RATIO_4_3)
+            .setTargetResolution(TARGET_RESOLUTION)
             .setTargetRotation(binding.frontViewFinder.display?.rotation ?: Surface.ROTATION_0)
             .build()
-            .also { it.setSurfaceProvider(binding.frontViewFinder.surfaceProvider) }
+            .also {
+                it.setSurfaceProvider { request ->
+                    Log.d(TAG, "Front surface requested: ${request.resolution}")
+                    frontSurfaceProvider.onSurfaceRequested(request)
+                }
+            }
 
         val detectorOptions = FaceDetectorOptions.Builder()
             .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_ACCURATE)
@@ -224,6 +284,7 @@ class MainActivity : AppCompatActivity() {
 
         val imageAnalysis = ImageAnalysis.Builder()
             .setTargetAspectRatio(AspectRatio.RATIO_4_3)
+            .setTargetResolution(TARGET_RESOLUTION)
             .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
             .build()
 
@@ -235,37 +296,66 @@ class MainActivity : AppCompatActivity() {
         )
         imageAnalysis.setAnalyzer(cameraExecutor, analyzer!!)
 
-        val frontUseCases = arrayOf<UseCase>(frontPreview, imageAnalysis)
+        val frontViewport = ViewPort.Builder(
+            binding.frontViewFinder.width,
+            binding.frontViewFinder.height,
+            binding.frontViewFinder.display?.rotation ?: Surface.ROTATION_0
+        ).setAspectRatio(AspectRatio.RATIO_4_3).build()
+
+        val frontGroup = UseCaseGroup.Builder()
+            .addUseCase(frontPreview)
+            .addUseCase(imageAnalysis)
+            .setViewPort(frontViewport)
+            .build()
+
         val frontCameraSelector = getFrontCameraSelector()
-        try {
-            provider.bindToLifecycle(frontCameraLifecycleOwner, frontCameraSelector, *frontUseCases)
-        } catch (exception: Exception) {
-            handleDriverState(DriverState.Error(exception.localizedMessage ?: getString(R.string.status_error)))
-        }
+        var frontCamera: Camera? = null
 
         if (!supportsConcurrentCameras) {
             roadObjectAnalyzer = null
             releaseRoadObjectDetector()
             binding.rearOverlay.clearDetections()
             updateRearCameraUiVisibility(false)
+            try {
+                frontCamera = provider.bindToLifecycle(frontCameraLifecycleOwner, frontCameraSelector, frontGroup)
+            } catch (exception: Exception) {
+                handleDriverState(DriverState.Error(exception.localizedMessage ?: getString(R.string.status_error)))
+            }
+            observeFrontCameraState(frontCamera)
             return
         }
 
-        updateRearCameraUiVisibility(true)
-
+        val rearSurfaceProvider = binding.rearViewFinder.surfaceProvider
         val rearPreview = Preview.Builder()
             .setTargetAspectRatio(AspectRatio.RATIO_4_3)
+            .setTargetResolution(TARGET_RESOLUTION)
             .setTargetRotation(binding.rearViewFinder.display?.rotation ?: Surface.ROTATION_0)
             .build()
-            .also { it.setSurfaceProvider(binding.rearViewFinder.surfaceProvider) }
+            .also {
+                it.setSurfaceProvider { request ->
+                    Log.d(TAG, "Rear surface requested: ${request.resolution}")
+                    rearSurfaceProvider.onSurfaceRequested(request)
+                }
+            }
 
-        val rearUseCases = mutableListOf<UseCase>(rearPreview)
         val rearCameraSelector = getRearCameraSelector()
 
+        val rearViewport = ViewPort.Builder(
+            binding.rearViewFinder.width,
+            binding.rearViewFinder.height,
+            binding.rearViewFinder.display?.rotation ?: Surface.ROTATION_0
+        ).setAspectRatio(AspectRatio.RATIO_4_3).build()
+
+        val rearGroupBuilder = UseCaseGroup.Builder()
+            .addUseCase(rearPreview)
+            .setViewPort(rearViewport)
+
+        var rearImageAnalysis: ImageAnalysis? = null
         if (roadDetectionEnabled) {
             ensureRoadObjectDetector()
-            val rearImageAnalysis = ImageAnalysis.Builder()
+            rearImageAnalysis = ImageAnalysis.Builder()
                 .setTargetAspectRatio(AspectRatio.RATIO_4_3)
+                .setTargetResolution(TARGET_RESOLUTION)
                 .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                 .build()
             roadObjectAnalyzer = RoadObjectAnalyzer(
@@ -274,28 +364,33 @@ class MainActivity : AppCompatActivity() {
                 onDetectionsUpdated = ::onRoadDetectionsUpdated
             )
             rearImageAnalysis.setAnalyzer(cameraExecutor, roadObjectAnalyzer!!)
-            rearUseCases.add(rearImageAnalysis)
+            rearGroupBuilder.addUseCase(rearImageAnalysis)
         } else {
             roadObjectAnalyzer = null
             releaseRoadObjectDetector()
             binding.rearOverlay.clearDetections()
         }
 
-        val rearUseCasesArray = rearUseCases.toTypedArray()
+        val rearGroup = rearGroupBuilder.build()
+        var rearCamera: Camera? = null
         var rearCameraBound = false
         var roadDetectionFallbackAttempted = false
         try {
-            provider.bindToLifecycle(rearCameraLifecycleOwner, rearCameraSelector, *rearUseCasesArray)
+            rearCamera = provider.bindToLifecycle(rearCameraLifecycleOwner, rearCameraSelector, rearGroup)
             rearCameraBound = true
         } catch (exception: Exception) {
             Log.w(TAG, "Failed to bind rear camera use cases", exception)
-            if (roadDetectionEnabled && rearUseCases.size > 1) {
+            if (roadDetectionEnabled && rearImageAnalysis != null) {
                 roadDetectionFallbackAttempted = true
                 binding.rearOverlay.clearDetections()
                 roadObjectAnalyzer = null
                 releaseRoadObjectDetector()
+                val fallbackRearGroup = UseCaseGroup.Builder()
+                    .addUseCase(rearPreview)
+                    .setViewPort(rearViewport)
+                    .build()
                 try {
-                    provider.bindToLifecycle(rearCameraLifecycleOwner, rearCameraSelector, rearPreview)
+                    rearCamera = provider.bindToLifecycle(rearCameraLifecycleOwner, rearCameraSelector, fallbackRearGroup)
                     rearCameraBound = true
                 } catch (fallbackException: Exception) {
                     Log.e(TAG, "Failed to bind rear camera preview only fallback", fallbackException)
@@ -305,6 +400,27 @@ class MainActivity : AppCompatActivity() {
                 binding.rearOverlay.clearDetections()
                 releaseRoadObjectDetector()
             }
+        }
+
+        try {
+            frontCamera = provider.bindToLifecycle(frontCameraLifecycleOwner, frontCameraSelector, frontGroup)
+        } catch (exception: Exception) {
+            handleDriverState(DriverState.Error(exception.localizedMessage ?: getString(R.string.status_error)))
+        }
+
+        observeFrontCameraState(frontCamera)
+        observeRearCameraState(rearCamera)
+    }
+
+    private fun observeFrontCameraState(camera: Camera?) {
+        camera?.cameraInfo?.cameraState?.observe(this) { state ->
+            Log.d(TAG, "Front camera state: ${state.type} error=${state.error?.code}")
+        }
+    }
+
+    private fun observeRearCameraState(camera: Camera?) {
+        camera?.cameraInfo?.cameraState?.observe(this) { state ->
+            Log.d(TAG, "Rear camera state: ${state.type} error=${state.error?.code}")
         }
     }
 
@@ -598,6 +714,7 @@ class MainActivity : AppCompatActivity() {
         private const val PREFS_NAME = "drivesense_settings"
         private const val KEY_REQUIRE_DRIVING_CHECK = "require_driving_check"
         private const val KEY_ROAD_DETECTION_ENABLED = "road_detection_enabled"
+        private val TARGET_RESOLUTION = Size(1280, 960)
     }
 }
 
