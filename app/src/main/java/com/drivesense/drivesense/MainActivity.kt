@@ -188,7 +188,7 @@ class MainActivity : AppCompatActivity() {
             try {
                 val provider = future.get()
                 cameraProvider = provider
-                supportsConcurrentCameras = isConcurrentFrontBackCameraSupported()
+                supportsConcurrentCameras = isConcurrentFrontBackCameraSupported(provider)
                 updateConcurrentCameraAvailability()
                 bindUseCases()
             } catch (exception: Exception) {
@@ -434,40 +434,74 @@ class MainActivity : AppCompatActivity() {
         binding.rearOverlay.clearDetections()
     }
 
-    private fun isConcurrentFrontBackCameraSupported(): Boolean {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
-            return false
-        }
-        if (!packageManager.hasSystemFeature(PackageManager.FEATURE_CAMERA_CONCURRENT)) {
-            return false
-        }
-        val cameraManager = getSystemService(Context.CAMERA_SERVICE) as? CameraManager ?: return false
-        val concurrentSets = try {
-            cameraManager.concurrentCameraIds
-        } catch (exception: Exception) {
-            Log.w(TAG, "Unable to query concurrent camera combinations", exception)
-            return false
-        }
-        if (concurrentSets.isEmpty()) {
-            return false
-        }
-        return concurrentSets.any { cameraIdSet ->
-            var hasFront = false
-            var hasBack = false
-            for (cameraId in cameraIdSet) {
-                val facing = try {
-                    cameraManager.getCameraCharacteristics(cameraId)
-                        .get(CameraCharacteristics.LENS_FACING)
+    private fun isConcurrentFrontBackCameraSupported(provider: ProcessCameraProvider): Boolean {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R &&
+            packageManager.hasSystemFeature(PackageManager.FEATURE_CAMERA_CONCURRENT)
+        ) {
+            val cameraManager = getSystemService(Context.CAMERA_SERVICE) as? CameraManager
+            if (cameraManager != null) {
+                val concurrentSets = try {
+                    cameraManager.concurrentCameraIds
                 } catch (exception: Exception) {
-                    Log.w(TAG, "Unable to read camera characteristics for $cameraId", exception)
-                    return@any false
+                    Log.w(TAG, "Unable to query concurrent camera combinations", exception)
+                    null
                 }
-                when (facing) {
-                    CameraCharacteristics.LENS_FACING_FRONT -> hasFront = true
-                    CameraCharacteristics.LENS_FACING_BACK -> hasBack = true
+                if (!concurrentSets.isNullOrEmpty()) {
+                    val hasFrontBackCombination = concurrentSets.any { cameraIdSet ->
+                        var hasFront = false
+                        var hasBack = false
+                        for (cameraId in cameraIdSet) {
+                            val facing = try {
+                                cameraManager.getCameraCharacteristics(cameraId)
+                                    .get(CameraCharacteristics.LENS_FACING)
+                            } catch (exception: Exception) {
+                                Log.w(TAG, "Unable to read camera characteristics for $cameraId", exception)
+                                continue
+                            }
+                            when (facing) {
+                                CameraCharacteristics.LENS_FACING_FRONT -> hasFront = true
+                                CameraCharacteristics.LENS_FACING_BACK -> hasBack = true
+                            }
+                        }
+                        hasFront && hasBack
+                    }
+                    if (hasFrontBackCombination) {
+                        return true
+                    }
                 }
             }
-            hasFront && hasBack
+        }
+        return provider.isConcurrentCameraModeSupportedCompat()
+    }
+
+    private fun ProcessCameraProvider.isConcurrentCameraModeSupportedCompat(): Boolean {
+        return try {
+            val method = ProcessCameraProvider::class.java.getMethod(
+                "isConcurrentCameraModeSupported",
+                CameraSelector::class.java,
+                CameraSelector::class.java
+            )
+            method.invoke(
+                this,
+                CameraSelector.DEFAULT_FRONT_CAMERA,
+                CameraSelector.DEFAULT_BACK_CAMERA
+            ) as Boolean
+        } catch (error: NoSuchMethodException) {
+            logConcurrentCameraCheckUnavailable(error)
+            false
+        } catch (error: NoSuchMethodError) {
+            logConcurrentCameraCheckUnavailable(error)
+            false
+        } catch (exception: Exception) {
+            Log.w(TAG, "Unable to query concurrent camera mode support", exception)
+            false
+        }
+    }
+
+    private fun logConcurrentCameraCheckUnavailable(error: Throwable) {
+        if (!hasLoggedConcurrentCameraCheckWarning) {
+            Log.w(TAG, "Concurrent camera mode support check unavailable", error)
+            hasLoggedConcurrentCameraCheckWarning = true
         }
     }
 
@@ -516,6 +550,7 @@ class MainActivity : AppCompatActivity() {
         private const val PREFS_NAME = "drivesense_settings"
         private const val KEY_REQUIRE_DRIVING_CHECK = "require_driving_check"
         private const val KEY_ROAD_DETECTION_ENABLED = "road_detection_enabled"
+        private var hasLoggedConcurrentCameraCheckWarning = false
     }
 }
 
