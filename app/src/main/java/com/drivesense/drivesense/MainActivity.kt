@@ -10,8 +10,8 @@ import android.os.Bundle
 import android.os.SystemClock
 import android.os.VibrationEffect
 import android.os.Vibrator
-import android.view.Surface
 import android.util.Log
+import android.view.Surface
 import android.view.View
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
@@ -23,6 +23,9 @@ import androidx.camera.core.UseCase
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.core.content.ContextCompat
 import androidx.core.content.edit
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleOwner
+import androidx.lifecycle.LifecycleRegistry
 import com.drivesense.drivesense.databinding.ActivityMainBinding
 import com.drivesense.drivesense.ui.DetectionOverlayView.RoadObjectDetection
 import com.google.mlkit.vision.face.FaceDetection
@@ -55,6 +58,8 @@ class MainActivity : AppCompatActivity() {
     private var requireDrivingCheck: Boolean = true
     private var roadDetectionEnabled: Boolean = false
     private var latestDriverState: DriverState = DriverState.Initializing
+    private val frontCameraLifecycleOwner = ManualLifecycleOwner()
+    private val rearCameraLifecycleOwner = ManualLifecycleOwner()
 
     private val permissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
@@ -81,6 +86,9 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
+
+        frontCameraLifecycleOwner.onCreate()
+        rearCameraLifecycleOwner.onCreate()
 
         cameraExecutor = Executors.newSingleThreadExecutor()
         binding.lastEventText.visibility = View.GONE
@@ -122,14 +130,30 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    override fun onStart() {
+        super.onStart()
+        frontCameraLifecycleOwner.onStart()
+        rearCameraLifecycleOwner.onStart()
+    }
+
     override fun onResume() {
         super.onResume()
+        frontCameraLifecycleOwner.onResume()
+        rearCameraLifecycleOwner.onResume()
         ensureDrivingStatusMonitorStarted()
     }
 
     override fun onPause() {
         super.onPause()
+        frontCameraLifecycleOwner.onPause()
+        rearCameraLifecycleOwner.onPause()
         drivingStatusMonitor.stop()
+    }
+
+    override fun onStop() {
+        super.onStop()
+        frontCameraLifecycleOwner.onStop()
+        rearCameraLifecycleOwner.onStop()
     }
 
     override fun onDestroy() {
@@ -137,6 +161,8 @@ class MainActivity : AppCompatActivity() {
         releaseCamera()
         cameraExecutor.shutdown()
         toneGenerator?.release()
+        rearCameraLifecycleOwner.onDestroy()
+        frontCameraLifecycleOwner.onDestroy()
     }
 
     private fun hasCameraPermission(): Boolean {
@@ -192,7 +218,7 @@ class MainActivity : AppCompatActivity() {
 
         val frontUseCases = arrayOf<UseCase>(frontPreview, imageAnalysis)
         try {
-            provider.bindToLifecycle(this, CameraSelector.DEFAULT_FRONT_CAMERA, *frontUseCases)
+            provider.bindToLifecycle(frontCameraLifecycleOwner, CameraSelector.DEFAULT_FRONT_CAMERA, *frontUseCases)
         } catch (exception: Exception) {
             handleDriverState(DriverState.Error(exception.localizedMessage ?: getString(R.string.status_error)))
         }
@@ -228,7 +254,7 @@ class MainActivity : AppCompatActivity() {
         var rearCameraBound = false
         var roadDetectionFallbackAttempted = false
         try {
-            provider.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, *rearUseCasesArray)
+            provider.bindToLifecycle(rearCameraLifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA, *rearUseCasesArray)
             rearCameraBound = true
         } catch (exception: Exception) {
             Log.w(TAG, "Failed to bind rear camera use cases", exception)
@@ -238,7 +264,7 @@ class MainActivity : AppCompatActivity() {
                 roadObjectAnalyzer = null
                 releaseRoadObjectDetector()
                 try {
-                    provider.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, rearPreview)
+                    provider.bindToLifecycle(rearCameraLifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA, rearPreview)
                     rearCameraBound = true
                 } catch (fallbackException: Exception) {
                     Log.e(TAG, "Failed to bind rear camera preview only fallback", fallbackException)
@@ -407,6 +433,36 @@ class MainActivity : AppCompatActivity() {
         private const val PREFS_NAME = "drivesense_settings"
         private const val KEY_REQUIRE_DRIVING_CHECK = "require_driving_check"
         private const val KEY_ROAD_DETECTION_ENABLED = "road_detection_enabled"
+    }
+}
+
+private class ManualLifecycleOwner : LifecycleOwner {
+    private val lifecycleRegistry = LifecycleRegistry(this)
+
+    override fun getLifecycle(): Lifecycle = lifecycleRegistry
+
+    fun onCreate() {
+        lifecycleRegistry.currentState = Lifecycle.State.CREATED
+    }
+
+    fun onStart() {
+        lifecycleRegistry.currentState = Lifecycle.State.STARTED
+    }
+
+    fun onResume() {
+        lifecycleRegistry.currentState = Lifecycle.State.RESUMED
+    }
+
+    fun onPause() {
+        lifecycleRegistry.currentState = Lifecycle.State.STARTED
+    }
+
+    fun onStop() {
+        lifecycleRegistry.currentState = Lifecycle.State.CREATED
+    }
+
+    fun onDestroy() {
+        lifecycleRegistry.currentState = Lifecycle.State.DESTROYED
     }
 }
 
