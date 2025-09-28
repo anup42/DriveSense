@@ -262,7 +262,7 @@ class MainActivity : AppCompatActivity() {
             previewView.display?.rotation ?: Surface.ROTATION_0
         )
         if (supportsConcurrentCameras) {
-            builder.setCameraMode(ViewPort.CameraMode.CONCURRENT)
+            builder.setConcurrentCameraModeCompat()
         }
         return builder.build()
     }
@@ -554,6 +554,22 @@ class MainActivity : AppCompatActivity() {
         roadObjectAnalyzer = null
         releaseRoadObjectDetector()
         binding.rearOverlay.clearDetections()
+    }
+
+    private fun ViewPort.Builder.setConcurrentCameraModeCompat() {
+        try {
+            val cameraModeClass = Class.forName("androidx.camera.core.ViewPort$CameraMode")
+            val concurrentField = cameraModeClass.getField("CONCURRENT")
+            val concurrentValue = concurrentField.get(null)
+            val method = ViewPort.Builder::class.java.getMethod("setCameraMode", cameraModeClass)
+            method.invoke(this, concurrentValue)
+        } catch (ignored: ClassNotFoundException) {
+            Log.w(TAG, "CameraMode class unavailable; cannot request concurrent camera mode")
+        } catch (ignored: NoSuchMethodException) {
+            Log.w(TAG, "setCameraMode not available; cannot request concurrent camera mode")
+        } catch (error: Throwable) {
+            Log.w(TAG, "Unexpected error while requesting concurrent camera mode", error)
+        }
     }
 
     private fun ProcessCameraProvider.isConcurrentCameraModeSupportedCompat(): Boolean {
