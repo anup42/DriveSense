@@ -235,18 +235,6 @@ class MainActivity : AppCompatActivity() {
     private fun bindUseCasesInternal(provider: ProcessCameraProvider) {
         provider.unbindAll()
 
-        val frontSurfaceProvider = binding.frontViewFinder.surfaceProvider
-        val frontPreview = Preview.Builder()
-            .setTargetResolution(TARGET_RESOLUTION)
-            .setTargetRotation(binding.frontViewFinder.display?.rotation ?: Surface.ROTATION_0)
-            .build()
-            .also {
-                it.setSurfaceProvider { request ->
-                    Log.d(TAG, "Front surface requested: ${request.resolution}")
-                    frontSurfaceProvider.onSurfaceRequested(request)
-                }
-            }
-
         val detectorOptions = FaceDetectorOptions.Builder()
             .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_ACCURATE)
             .setLandmarkMode(FaceDetectorOptions.LANDMARK_MODE_ALL)
@@ -259,7 +247,7 @@ class MainActivity : AppCompatActivity() {
         faceDetector = FaceDetection.getClient(detectorOptions)
 
         val imageAnalysis = ImageAnalysis.Builder()
-            .setTargetResolution(TARGET_RESOLUTION)
+            .setTargetResolution(ANALYSIS_TARGET_RESOLUTION)
             .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
             .build()
 
@@ -271,8 +259,24 @@ class MainActivity : AppCompatActivity() {
         )
         imageAnalysis.setAnalyzer(cameraExecutor, analyzer!!)
 
-        val frontGroup = UseCaseGroup.Builder()
-            .addUseCase(frontPreview)
+        val useFrontPreview = !supportsConcurrentCameras || !roadDetectionEnabled
+        binding.frontPreviewContainer.visibility = if (useFrontPreview) View.VISIBLE else View.INVISIBLE
+        val frontGroupBuilder = UseCaseGroup.Builder()
+        if (useFrontPreview) {
+            val frontSurfaceProvider = binding.frontViewFinder.surfaceProvider
+            val frontPreview = Preview.Builder()
+                .setTargetResolution(PREVIEW_TARGET_RESOLUTION)
+                .setTargetRotation(binding.frontViewFinder.display?.rotation ?: Surface.ROTATION_0)
+                .build()
+                .also {
+                    it.setSurfaceProvider { request ->
+                        Log.d(TAG, "Front surface requested: ${request.resolution}")
+                        frontSurfaceProvider.onSurfaceRequested(request)
+                    }
+                }
+            frontGroupBuilder.addUseCase(frontPreview)
+        }
+        val frontGroup = frontGroupBuilder
             .addUseCase(imageAnalysis)
             .build()
 
@@ -295,7 +299,7 @@ class MainActivity : AppCompatActivity() {
 
         val rearSurfaceProvider = binding.rearViewFinder.surfaceProvider
         val rearPreview = Preview.Builder()
-            .setTargetResolution(TARGET_RESOLUTION)
+            .setTargetResolution(PREVIEW_TARGET_RESOLUTION)
             .setTargetRotation(binding.rearViewFinder.display?.rotation ?: Surface.ROTATION_0)
             .build()
             .also {
@@ -314,7 +318,7 @@ class MainActivity : AppCompatActivity() {
         if (roadDetectionEnabled) {
             ensureRoadObjectDetector()
             rearImageAnalysis = ImageAnalysis.Builder()
-                .setTargetResolution(TARGET_RESOLUTION)
+                .setTargetResolution(ANALYSIS_TARGET_RESOLUTION)
                 .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                 .build()
             roadObjectAnalyzer = RoadObjectAnalyzer(
@@ -741,7 +745,8 @@ class MainActivity : AppCompatActivity() {
         private const val PREFS_NAME = "drivesense_settings"
         private const val KEY_REQUIRE_DRIVING_CHECK = "require_driving_check"
         private const val KEY_ROAD_DETECTION_ENABLED = "road_detection_enabled"
-        private val TARGET_RESOLUTION = Size(1280, 960)
+        private val PREVIEW_TARGET_RESOLUTION = Size(1280, 960)
+        private val ANALYSIS_TARGET_RESOLUTION = Size(640, 480)
     }
 }
 
