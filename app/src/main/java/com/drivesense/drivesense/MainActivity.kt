@@ -20,7 +20,6 @@ import android.view.View
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.camera.camera2.interop.Camera2CameraInfo
-import androidx.camera.core.AspectRatio
 import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
@@ -261,7 +260,6 @@ class MainActivity : AppCompatActivity() {
 
         val frontSurfaceProvider = binding.frontViewFinder.surfaceProvider
         val frontPreview = Preview.Builder()
-            .setTargetAspectRatio(AspectRatio.RATIO_4_3)
             .setTargetResolution(TARGET_RESOLUTION)
             .setTargetRotation(binding.frontViewFinder.display?.rotation ?: Surface.ROTATION_0)
             .build()
@@ -284,7 +282,6 @@ class MainActivity : AppCompatActivity() {
         faceDetector = FaceDetection.getClient(detectorOptions)
 
         val imageAnalysis = ImageAnalysis.Builder()
-            .setTargetAspectRatio(AspectRatio.RATIO_4_3)
             .setTargetResolution(TARGET_RESOLUTION)
             .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
             .build()
@@ -327,7 +324,6 @@ class MainActivity : AppCompatActivity() {
 
         val rearSurfaceProvider = binding.rearViewFinder.surfaceProvider
         val rearPreview = Preview.Builder()
-            .setTargetAspectRatio(AspectRatio.RATIO_4_3)
             .setTargetResolution(TARGET_RESOLUTION)
             .setTargetRotation(binding.rearViewFinder.display?.rotation ?: Surface.ROTATION_0)
             .build()
@@ -353,7 +349,6 @@ class MainActivity : AppCompatActivity() {
         if (roadDetectionEnabled) {
             ensureRoadObjectDetector()
             rearImageAnalysis = ImageAnalysis.Builder()
-                .setTargetAspectRatio(AspectRatio.RATIO_4_3)
                 .setTargetResolution(TARGET_RESOLUTION)
                 .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                 .build()
