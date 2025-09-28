@@ -3,6 +3,8 @@ package com.drivesense.drivesense
 import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
+import android.hardware.camera2.CameraCharacteristics
+import android.hardware.camera2.CameraManager
 import android.media.AudioManager
 import android.media.ToneGenerator
 import android.os.Build
@@ -15,6 +17,7 @@ import android.view.Surface
 import android.view.View
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
+import androidx.camera.camera2.interop.Camera2CameraInfo
 import androidx.camera.core.AspectRatio
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
@@ -445,15 +448,79 @@ class MainActivity : AppCompatActivity() {
                 CameraSelector.DEFAULT_BACK_CAMERA
             ) as Boolean
         } catch (error: NoSuchMethodException) {
-            Log.w(TAG, "Concurrent camera mode support check unavailable", error)
-            false
+            Log.w(TAG, "Concurrent camera mode support check unavailable via CameraX API", error)
+            checkConcurrentCameraSupportViaCameraManager()
         } catch (error: NoSuchMethodError) {
-            Log.w(TAG, "Concurrent camera mode support check unavailable", error)
-            false
+            Log.w(TAG, "Concurrent camera mode support check unavailable via CameraX API", error)
+            checkConcurrentCameraSupportViaCameraManager()
         } catch (exception: Exception) {
             Log.w(TAG, "Unable to query concurrent camera mode support", exception)
             false
         }
+    }
+
+    private fun ProcessCameraProvider.checkConcurrentCameraSupportViaCameraManager(): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+            Log.i(TAG, "Concurrent camera mode requires API 30+, current API: ${Build.VERSION.SDK_INT}")
+            return false
+        }
+
+        val cameraManager = getSystemService(Context.CAMERA_SERVICE) as? CameraManager
+        if (cameraManager == null) {
+            Log.w(TAG, "CameraManager unavailable, cannot check concurrent camera support")
+            return false
+        }
+
+        val concurrentCameraIds = try {
+            cameraManager.concurrentCameraIds
+        } catch (error: SecurityException) {
+            Log.w(TAG, "Unable to query concurrent camera ids due to missing permission", error)
+            return false
+        } catch (error: Throwable) {
+            Log.w(TAG, "Unexpected error while querying concurrent camera ids", error)
+            return false
+        }
+
+        if (concurrentCameraIds.isNullOrEmpty()) {
+            Log.i(TAG, "Device does not report any concurrent camera combinations")
+            return false
+        }
+
+        val cameraInfos = availableCameraInfos
+        val frontCameraIds = cameraInfos.mapNotNull { info ->
+            val cameraInfo = Camera2CameraInfo.from(info)
+            val lensFacing = cameraInfo.getCameraCharacteristic(CameraCharacteristics.LENS_FACING)
+            if (lensFacing == CameraCharacteristics.LENS_FACING_FRONT) {
+                cameraInfo.cameraId
+            } else {
+                null
+            }
+        }.toSet()
+
+        val backCameraIds = cameraInfos.mapNotNull { info ->
+            val cameraInfo = Camera2CameraInfo.from(info)
+            val lensFacing = cameraInfo.getCameraCharacteristic(CameraCharacteristics.LENS_FACING)
+            if (lensFacing == CameraCharacteristics.LENS_FACING_BACK) {
+                cameraInfo.cameraId
+            } else {
+                null
+            }
+        }.toSet()
+
+        if (frontCameraIds.isEmpty() || backCameraIds.isEmpty()) {
+            Log.i(TAG, "Missing required front or back cameras for concurrent mode")
+            return false
+        }
+
+        val supportsFrontBackCombo = concurrentCameraIds.any { combo ->
+            combo.any { it in frontCameraIds } && combo.any { it in backCameraIds }
+        }
+
+        if (!supportsFrontBackCombo) {
+            Log.i(TAG, "No concurrent camera combination includes both front and back cameras")
+        }
+
+        return supportsFrontBackCombo
     }
 
     private fun ensureRoadObjectDetector() {
