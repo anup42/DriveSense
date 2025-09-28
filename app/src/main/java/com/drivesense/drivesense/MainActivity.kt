@@ -26,6 +26,7 @@ import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.Preview
 import androidx.camera.core.UseCaseGroup
 import androidx.camera.core.ViewPort
+import androidx.camera.core.concurrent.ConcurrentCamera
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.core.content.ContextCompat
@@ -368,14 +369,25 @@ class MainActivity : AppCompatActivity() {
         }
 
         val rearGroup = rearGroupBuilder.build()
+        val frontConfig = ConcurrentCamera.SingleCameraConfig(
+            frontCameraSelector,
+            frontGroup,
+            frontCameraLifecycleOwner
+        )
+        val rearConfig = ConcurrentCamera.SingleCameraConfig(
+            rearCameraSelector,
+            rearGroup,
+            rearCameraLifecycleOwner
+        )
+
+        var concurrentCamera: ConcurrentCamera? = null
         var rearCamera: Camera? = null
-        var rearCameraBound = false
         var roadDetectionFallbackAttempted = false
+
         try {
-            rearCamera = provider.bindToLifecycle(rearCameraLifecycleOwner, rearCameraSelector, rearGroup)
-            rearCameraBound = true
+            concurrentCamera = provider.bindToLifecycle(listOf(frontConfig, rearConfig))
         } catch (exception: Exception) {
-            Log.w(TAG, "Failed to bind rear camera use cases", exception)
+            Log.w(TAG, "Failed to bind concurrent camera use cases", exception)
             if (roadDetectionEnabled && rearImageAnalysis != null) {
                 roadDetectionFallbackAttempted = true
                 binding.rearOverlay.clearDetections()
@@ -385,24 +397,36 @@ class MainActivity : AppCompatActivity() {
                     .addUseCase(rearPreview)
                     .setViewPort(rearViewport)
                     .build()
+                val fallbackRearConfig = ConcurrentCamera.SingleCameraConfig(
+                    rearCameraSelector,
+                    fallbackRearGroup,
+                    rearCameraLifecycleOwner
+                )
                 try {
-                    rearCamera = provider.bindToLifecycle(rearCameraLifecycleOwner, rearCameraSelector, fallbackRearGroup)
-                    rearCameraBound = true
+                    concurrentCamera = provider.bindToLifecycle(listOf(frontConfig, fallbackRearConfig))
                 } catch (fallbackException: Exception) {
-                    Log.e(TAG, "Failed to bind rear camera preview only fallback", fallbackException)
+                    Log.e(TAG, "Failed to bind concurrent cameras with preview-only rear", fallbackException)
                 }
             }
-            if (!rearCameraBound && !roadDetectionFallbackAttempted) {
+            if (concurrentCamera == null && !roadDetectionFallbackAttempted) {
                 binding.rearOverlay.clearDetections()
                 releaseRoadObjectDetector()
             }
         }
 
-        try {
-            frontCamera = provider.bindToLifecycle(frontCameraLifecycleOwner, frontCameraSelector, frontGroup)
-        } catch (exception: Exception) {
-            handleDriverState(DriverState.Error(exception.localizedMessage ?: getString(R.string.status_error)))
+        if (concurrentCamera == null) {
+            try {
+                frontCamera = provider.bindToLifecycle(frontCameraLifecycleOwner, frontCameraSelector, frontGroup)
+            } catch (exception: Exception) {
+                handleDriverState(DriverState.Error(exception.localizedMessage ?: getString(R.string.status_error)))
+            }
+            observeFrontCameraState(frontCamera)
+            observeRearCameraState(null)
+            return
         }
+
+        frontCamera = concurrentCamera.findCamera(concurrentFrontCameraId, CameraSelector.LENS_FACING_FRONT)
+        rearCamera = concurrentCamera.findCamera(concurrentBackCameraId, CameraSelector.LENS_FACING_BACK)
 
         observeFrontCameraState(frontCamera)
         observeRearCameraState(rearCamera)
@@ -552,6 +576,22 @@ class MainActivity : AppCompatActivity() {
         binding.rearOverlay.clearDetections()
     }
 
+    private fun ConcurrentCamera.findCamera(cameraId: String?, lensFacing: Int): Camera? {
+        val candidate = if (!cameraId.isNullOrEmpty()) {
+            cameras.firstOrNull { camera ->
+                Camera2CameraInfo.from(camera.cameraInfo).cameraId == cameraId
+            }
+        } else {
+            null
+        }
+        if (candidate != null) {
+            return candidate
+        }
+        return cameras.firstOrNull { camera ->
+            Camera2CameraInfo.from(camera.cameraInfo).lensFacing == lensFacing
+        }
+    }
+
     private fun ProcessCameraProvider.isConcurrentCameraModeSupportedCompat(): Boolean {
         concurrentFrontCameraId = null
         concurrentBackCameraId = null
@@ -559,6 +599,28 @@ class MainActivity : AppCompatActivity() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
             Log.i(TAG, "Concurrent camera mode requires API 30+, current API: ${Build.VERSION.SDK_INT}")
             return false
+        }
+
+        val concurrentCameraInfos = availableConcurrentCameraInfos
+        if (concurrentCameraInfos.isNotEmpty()) {
+            Log.i(TAG, "CameraX reports ${concurrentCameraInfos.size} concurrent camera combo(s)")
+            for (combo in concurrentCameraInfos) {
+                var frontInfo: androidx.camera.core.CameraInfo? = null
+                var backInfo: androidx.camera.core.CameraInfo? = null
+                for (info in combo) {
+                    when (Camera2CameraInfo.from(info).lensFacing) {
+                        CameraSelector.LENS_FACING_FRONT -> if (frontInfo == null) frontInfo = info
+                        CameraSelector.LENS_FACING_BACK -> if (backInfo == null) backInfo = info
+                    }
+                }
+                if (frontInfo != null && backInfo != null) {
+                    concurrentFrontCameraId = Camera2CameraInfo.from(frontInfo!!).cameraId
+                    concurrentBackCameraId = Camera2CameraInfo.from(backInfo!!).cameraId
+                    Log.i(TAG, "Dual camera support confirmed via CameraX concurrent combos")
+                    return true
+                }
+            }
+            Log.i(TAG, "No CameraX concurrent combo includes both front and back cameras")
         }
 
         val packageManager = packageManager
