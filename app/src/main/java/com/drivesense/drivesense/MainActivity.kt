@@ -101,11 +101,11 @@ class MainActivity : AppCompatActivity() {
         frontCameraLifecycleOwner.onCreate()
         rearCameraLifecycleOwner.onCreate()
 
-        binding.frontViewFinder.preferredImplementationMode =
+        binding.frontViewFinder.implementationMode =
             androidx.camera.view.PreviewView.ImplementationMode.COMPATIBLE
         binding.frontViewFinder.scaleType =
             androidx.camera.view.PreviewView.ScaleType.FILL_CENTER
-        binding.rearViewFinder.preferredImplementationMode =
+        binding.rearViewFinder.implementationMode =
             androidx.camera.view.PreviewView.ImplementationMode.COMPATIBLE
         binding.rearViewFinder.scaleType =
             androidx.camera.view.PreviewView.ScaleType.FILL_CENTER
