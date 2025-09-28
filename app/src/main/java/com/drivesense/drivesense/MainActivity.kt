@@ -26,6 +26,7 @@ import androidx.core.content.edit
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.LifecycleRegistry
+import androidx.lifecycle.Lifecycle.Event
 import com.drivesense.drivesense.databinding.ActivityMainBinding
 import com.drivesense.drivesense.ui.DetectionOverlayView.RoadObjectDetection
 import com.google.mlkit.vision.face.FaceDetection
@@ -443,27 +444,27 @@ private class ManualLifecycleOwner : LifecycleOwner {
         get() = lifecycleRegistry
 
     fun onCreate() {
-        lifecycleRegistry.currentState = Lifecycle.State.CREATED
+        lifecycleRegistry.handleLifecycleEvent(Event.ON_CREATE)
     }
 
     fun onStart() {
-        lifecycleRegistry.currentState = Lifecycle.State.STARTED
+        lifecycleRegistry.handleLifecycleEvent(Event.ON_START)
     }
 
     fun onResume() {
-        lifecycleRegistry.currentState = Lifecycle.State.RESUMED
+        lifecycleRegistry.handleLifecycleEvent(Event.ON_RESUME)
     }
 
     fun onPause() {
-        lifecycleRegistry.currentState = Lifecycle.State.STARTED
+        lifecycleRegistry.handleLifecycleEvent(Event.ON_PAUSE)
     }
 
     fun onStop() {
-        lifecycleRegistry.currentState = Lifecycle.State.CREATED
+        lifecycleRegistry.handleLifecycleEvent(Event.ON_STOP)
     }
 
     fun onDestroy() {
-        lifecycleRegistry.currentState = Lifecycle.State.DESTROYED
+        lifecycleRegistry.handleLifecycleEvent(Event.ON_DESTROY)
     }
 }
 
