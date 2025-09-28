@@ -1,110 +1,159 @@
 package com.drivesense.drivesense
 
+import android.Manifest
+import android.app.PendingIntent
+import android.content.BroadcastReceiver
 import android.content.Context
-import android.hardware.Sensor
-import android.hardware.SensorEvent
-import android.hardware.SensorEventListener
-import android.hardware.SensorManager
-import android.os.SystemClock
+import android.content.Intent
+import android.content.IntentFilter
+import android.os.Build
+import androidx.core.content.ContextCompat
+import com.google.android.gms.location.ActivityRecognition
+import com.google.android.gms.location.ActivityTransition
+import com.google.android.gms.location.ActivityTransitionRequest
+import com.google.android.gms.location.ActivityTransitionResult
+import com.google.android.gms.location.DetectedActivity
 import java.util.concurrent.Executor
-import kotlin.math.sqrt
 
 class DrivingStatusMonitor(
     context: Context,
     private val callbackExecutor: Executor,
-    private val onStatusChanged: (DrivingDetectionStatus) -> Unit,
-    private val motionThreshold: Float = DEFAULT_MOTION_THRESHOLD,
-    private val stationaryTimeoutMs: Long = DEFAULT_STATIONARY_TIMEOUT_MS,
-    private val drivingActivationMs: Long = DEFAULT_DRIVING_ACTIVATION_MS
-) : SensorEventListener {
+    private val onStatusChanged: (DrivingDetectionStatus) -> Unit
+) {
 
-    private val sensorManager = context.getSystemService(Context.SENSOR_SERVICE) as SensorManager
-    private val linearAccelerationSensor: Sensor? =
-        sensorManager.getDefaultSensor(Sensor.TYPE_LINEAR_ACCELERATION)
+    private val appContext = context.applicationContext
+    private val activityRecognitionClient = ActivityRecognition.getClient(appContext)
+    private val transitionRequest = ActivityTransitionRequest(
+        listOf(
+            ActivityTransition.Builder()
+                .setActivityType(DetectedActivity.IN_VEHICLE)
+                .setActivityTransition(ActivityTransition.ACTIVITY_TRANSITION_ENTER)
+                .build(),
+            ActivityTransition.Builder()
+                .setActivityType(DetectedActivity.IN_VEHICLE)
+                .setActivityTransition(ActivityTransition.ACTIVITY_TRANSITION_EXIT)
+                .build()
+        )
+    )
+    private val transitionAction = "${appContext.packageName}.DRIVING_TRANSITIONS"
+    private val transitionIntent = Intent(transitionAction).setPackage(appContext.packageName)
+    private val pendingIntentFlags = PendingIntent.FLAG_UPDATE_CURRENT or
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) PendingIntent.FLAG_MUTABLE else 0
+    private val transitionPendingIntent = PendingIntent.getBroadcast(
+        appContext,
+        REQUEST_CODE_TRANSITIONS,
+        transitionIntent,
+        pendingIntentFlags
+    )
 
-    private var lastMotionTimestamp: Long = NO_TIMESTAMP
-    private var drivingCandidateStart: Long = NO_TIMESTAMP
+    private var receiverRegistered = false
+    private var updatesRequested = false
 
-    var status: DrivingDetectionStatus =
-        if (linearAccelerationSensor == null) DrivingDetectionStatus.UNAVAILABLE else DrivingDetectionStatus.UNKNOWN
+    var status: DrivingDetectionStatus = DrivingDetectionStatus.UNKNOWN
         private set
 
+    private val transitionReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent == null || !ActivityTransitionResult.hasResult(intent)) {
+                return
+            }
+            val result = ActivityTransitionResult.extractResult(intent) ?: return
+            for (event in result.transitionEvents) {
+                if (event.activityType != DetectedActivity.IN_VEHICLE) continue
+                when (event.transitionType) {
+                    ActivityTransition.ACTIVITY_TRANSITION_ENTER -> {
+                        notifyStatus(DrivingDetectionStatus.DRIVING)
+                    }
+
+                    ActivityTransition.ACTIVITY_TRANSITION_EXIT -> {
+                        notifyStatus(DrivingDetectionStatus.STATIONARY)
+                    }
+                }
+            }
+        }
+    }
+
     fun start() {
-        linearAccelerationSensor ?: run {
+        if (!hasActivityRecognitionPermission(appContext)) {
             notifyStatus(DrivingDetectionStatus.UNAVAILABLE)
-            callbackExecutor.execute { onStatusChanged(status) }
+            dispatchCurrentStatus()
             return
         }
 
-        lastMotionTimestamp = NO_TIMESTAMP
-        drivingCandidateStart = NO_TIMESTAMP
-        sensorManager.registerListener(
-            this,
-            linearAccelerationSensor,
-            SensorManager.SENSOR_DELAY_NORMAL
-        )
-        callbackExecutor.execute { onStatusChanged(status) }
+        if (!receiverRegistered) {
+            registerReceiver()
+        }
+
+        if (!updatesRequested) {
+            activityRecognitionClient.requestActivityTransitionUpdates(transitionRequest, transitionPendingIntent)
+                .addOnSuccessListener {
+                    updatesRequested = true
+                }
+                .addOnFailureListener {
+                    updatesRequested = false
+                    notifyStatus(DrivingDetectionStatus.UNAVAILABLE)
+                }
+        }
+
+        if (status != DrivingDetectionStatus.UNKNOWN) {
+            notifyStatus(DrivingDetectionStatus.UNKNOWN)
+        } else {
+            dispatchCurrentStatus()
+        }
     }
 
     fun stop() {
-        sensorManager.unregisterListener(this)
-        lastMotionTimestamp = NO_TIMESTAMP
-        drivingCandidateStart = NO_TIMESTAMP
+        if (updatesRequested) {
+            activityRecognitionClient.removeActivityTransitionUpdates(transitionPendingIntent)
+            updatesRequested = false
+        }
+
+        if (receiverRegistered) {
+            appContext.unregisterReceiver(transitionReceiver)
+            receiverRegistered = false
+        }
+
         if (status != DrivingDetectionStatus.UNAVAILABLE) {
             notifyStatus(DrivingDetectionStatus.UNKNOWN)
         }
     }
 
-    override fun onSensorChanged(event: SensorEvent) {
-        val magnitude = sqrt(
-            event.values[0] * event.values[0] +
-                event.values[1] * event.values[1] +
-                event.values[2] * event.values[2]
-        )
-        val now = SystemClock.elapsedRealtime()
-
-        if (magnitude >= motionThreshold) {
-            lastMotionTimestamp = now
-            if (status != DrivingDetectionStatus.DRIVING) {
-                if (drivingCandidateStart == NO_TIMESTAMP) {
-                    drivingCandidateStart = now
-                }
-                if (now - drivingCandidateStart >= drivingActivationMs) {
-                    notifyStatus(DrivingDetectionStatus.DRIVING)
-                }
-            } else {
-                drivingCandidateStart = now
-            }
-            return
-        }
-
-        drivingCandidateStart = NO_TIMESTAMP
-
-        if (lastMotionTimestamp == NO_TIMESTAMP) {
-            lastMotionTimestamp = now
-        }
-
-        val elapsedSinceMotion = now - lastMotionTimestamp
-        if (elapsedSinceMotion >= stationaryTimeoutMs) {
-            notifyStatus(DrivingDetectionStatus.STATIONARY)
-        } else if (status == DrivingDetectionStatus.UNKNOWN) {
-            notifyStatus(DrivingDetectionStatus.UNKNOWN)
-        }
+    fun handlePermissionDenied() {
+        notifyStatus(DrivingDetectionStatus.UNAVAILABLE)
     }
 
-    override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) = Unit
+    private fun registerReceiver() {
+        val filter = IntentFilter(transitionAction)
+        ContextCompat.registerReceiver(
+            appContext,
+            transitionReceiver,
+            filter,
+            ContextCompat.RECEIVER_NOT_EXPORTED
+        )
+        receiverRegistered = true
+    }
 
     private fun notifyStatus(newStatus: DrivingDetectionStatus) {
         if (newStatus == status) return
         status = newStatus
-        callbackExecutor.execute { onStatusChanged(newStatus) }
+        dispatchCurrentStatus()
+    }
+
+    private fun dispatchCurrentStatus() {
+        callbackExecutor.execute { onStatusChanged(status) }
     }
 
     companion object {
-        private const val DEFAULT_MOTION_THRESHOLD = 1.2f
-        private const val DEFAULT_STATIONARY_TIMEOUT_MS = 15000L
-        private const val DEFAULT_DRIVING_ACTIVATION_MS = 2000L
-        private const val NO_TIMESTAMP = -1L
+        private const val REQUEST_CODE_TRANSITIONS = 1001
+
+        fun hasActivityRecognitionPermission(context: Context): Boolean {
+            return if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+                true
+            } else {
+                ContextCompat.checkSelfPermission(context, Manifest.permission.ACTIVITY_RECOGNITION) ==
+                    android.content.pm.PackageManager.PERMISSION_GRANTED
+            }
+        }
     }
 }
 
