@@ -425,8 +425,14 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        frontCamera = concurrentCamera.findCamera(concurrentFrontCameraId, CameraSelector.LENS_FACING_FRONT)
-        rearCamera = concurrentCamera.findCamera(concurrentBackCameraId, CameraSelector.LENS_FACING_BACK)
+        frontCamera = concurrentCamera.findCamera(
+            concurrentFrontCameraId,
+            CameraCharacteristics.LENS_FACING_FRONT
+        )
+        rearCamera = concurrentCamera.findCamera(
+            concurrentBackCameraId,
+            CameraCharacteristics.LENS_FACING_BACK
+        )
 
         observeFrontCameraState(frontCamera)
         observeRearCameraState(rearCamera)
@@ -577,18 +583,18 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun ConcurrentCamera.findCamera(cameraId: String?, lensFacing: Int): Camera? {
-        val candidate = if (!cameraId.isNullOrEmpty()) {
-            cameras.firstOrNull { camera ->
-                Camera2CameraInfo.from(camera.cameraInfo).cameraId == cameraId
+        val byId = if (!cameraId.isNullOrEmpty()) {
+            cameras.firstOrNull { cam ->
+                Camera2CameraInfo.from(cam.cameraInfo).cameraId == cameraId
             }
-        } else {
-            null
-        }
-        if (candidate != null) {
-            return candidate
-        }
-        return cameras.firstOrNull { camera ->
-            Camera2CameraInfo.from(camera.cameraInfo).lensFacing == lensFacing
+        } else null
+        if (byId != null) return byId
+
+        // Compare against CameraCharacteristics.* constants
+        return cameras.firstOrNull { cam ->
+            val facing = Camera2CameraInfo.from(cam.cameraInfo)
+                .getCameraCharacteristic(CameraCharacteristics.LENS_FACING)
+            facing == lensFacing
         }
     }
 
@@ -608,9 +614,11 @@ class MainActivity : AppCompatActivity() {
                 var frontInfo: androidx.camera.core.CameraInfo? = null
                 var backInfo: androidx.camera.core.CameraInfo? = null
                 for (info in combo) {
-                    when (Camera2CameraInfo.from(info).lensFacing) {
-                        CameraSelector.LENS_FACING_FRONT -> if (frontInfo == null) frontInfo = info
-                        CameraSelector.LENS_FACING_BACK -> if (backInfo == null) backInfo = info
+                    val facing = Camera2CameraInfo.from(info)
+                        .getCameraCharacteristic(CameraCharacteristics.LENS_FACING)
+                    when (facing) {
+                        CameraCharacteristics.LENS_FACING_FRONT -> if (frontInfo == null) frontInfo = info
+                        CameraCharacteristics.LENS_FACING_BACK -> if (backInfo == null) backInfo = info
                     }
                 }
                 if (frontInfo != null && backInfo != null) {
