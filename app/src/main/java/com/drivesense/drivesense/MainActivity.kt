@@ -11,6 +11,7 @@ import android.os.SystemClock
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.view.Surface
+import android.util.Log
 import android.view.View
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
@@ -223,11 +224,30 @@ class MainActivity : AppCompatActivity() {
             binding.rearOverlay.clearDetections()
         }
 
+        val rearUseCasesArray = rearUseCases.toTypedArray()
+        var rearCameraBound = false
+        var roadDetectionFallbackAttempted = false
         try {
-            provider.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, *rearUseCases.toTypedArray())
+            provider.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, *rearUseCasesArray)
+            rearCameraBound = true
         } catch (exception: Exception) {
-            binding.rearOverlay.clearDetections()
-            releaseRoadObjectDetector()
+            Log.w(TAG, "Failed to bind rear camera use cases", exception)
+            if (roadDetectionEnabled && rearUseCases.size > 1) {
+                roadDetectionFallbackAttempted = true
+                binding.rearOverlay.clearDetections()
+                roadObjectAnalyzer = null
+                releaseRoadObjectDetector()
+                try {
+                    provider.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, rearPreview)
+                    rearCameraBound = true
+                } catch (fallbackException: Exception) {
+                    Log.e(TAG, "Failed to bind rear camera preview only fallback", fallbackException)
+                }
+            }
+            if (!rearCameraBound && !roadDetectionFallbackAttempted) {
+                binding.rearOverlay.clearDetections()
+                releaseRoadObjectDetector()
+            }
         }
     }
 
@@ -379,6 +399,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     companion object {
+        private const val TAG = "MainActivity"
         private const val ALERT_COOLDOWN_MS = 5000L
         private const val ALERT_TONE_DURATION_MS = 800L
         private const val VIBRATION_DURATION_MS = 500L
