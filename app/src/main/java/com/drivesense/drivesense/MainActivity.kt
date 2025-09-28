@@ -18,13 +18,18 @@ import androidx.camera.core.AspectRatio
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.Preview
+import androidx.camera.core.UseCase
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.core.content.ContextCompat
 import androidx.core.content.edit
 import com.drivesense.drivesense.databinding.ActivityMainBinding
+import com.drivesense.drivesense.ui.DetectionOverlayView.RoadObjectDetection
 import com.google.mlkit.vision.face.FaceDetection
 import com.google.mlkit.vision.face.FaceDetector
 import com.google.mlkit.vision.face.FaceDetectorOptions
+import com.google.mlkit.vision.objects.ObjectDetection
+import com.google.mlkit.vision.objects.ObjectDetector
+import com.google.mlkit.vision.objects.defaults.ObjectDetectorOptions
 import java.text.DateFormat
 import java.util.Date
 import java.util.Locale
@@ -41,10 +46,13 @@ class MainActivity : AppCompatActivity() {
     private var faceDetector: FaceDetector? = null
     private var analyzer: DriveSenseAnalyzer? = null
     private var toneGenerator: ToneGenerator? = null
+    private var roadObjectDetector: ObjectDetector? = null
+    private var roadObjectAnalyzer: RoadObjectAnalyzer? = null
     private var lastAlertTimestamp: Long = 0L
     private lateinit var drivingStatusMonitor: DrivingStatusMonitor
     private var drivingDetectionStatus: DrivingDetectionStatus = DrivingDetectionStatus.UNKNOWN
     private var requireDrivingCheck: Boolean = true
+    private var roadDetectionEnabled: Boolean = false
     private var latestDriverState: DriverState = DriverState.Initializing
 
     private val permissionLauncher =
@@ -76,6 +84,7 @@ class MainActivity : AppCompatActivity() {
         cameraExecutor = Executors.newSingleThreadExecutor()
         binding.lastEventText.visibility = View.GONE
         requireDrivingCheck = settings.getBoolean(KEY_REQUIRE_DRIVING_CHECK, true)
+        roadDetectionEnabled = settings.getBoolean(KEY_ROAD_DETECTION_ENABLED, false)
         drivingStatusMonitor = DrivingStatusMonitor(
             context = this,
             callbackExecutor = mainThreadExecutor,
@@ -92,6 +101,16 @@ class MainActivity : AppCompatActivity() {
             }
         }
         updateDrivingStatusUi()
+
+        binding.roadDetectionSwitch.isChecked = roadDetectionEnabled
+        binding.roadDetectionSwitch.setOnCheckedChangeListener { _, isChecked ->
+            roadDetectionEnabled = isChecked
+            settings.edit { putBoolean(KEY_ROAD_DETECTION_ENABLED, isChecked) }
+            if (!isChecked) {
+                binding.rearOverlay.clearDetections()
+            }
+            bindUseCases()
+        }
 
         handleDriverState(DriverState.Initializing)
 
@@ -140,11 +159,11 @@ class MainActivity : AppCompatActivity() {
         val provider = cameraProvider ?: return
         provider.unbindAll()
 
-        val preview = Preview.Builder()
+        val frontPreview = Preview.Builder()
             .setTargetAspectRatio(AspectRatio.RATIO_4_3)
-            .setTargetRotation(binding.viewFinder.display?.rotation ?: Surface.ROTATION_0)
+            .setTargetRotation(binding.frontViewFinder.display?.rotation ?: Surface.ROTATION_0)
             .build()
-            .also { it.setSurfaceProvider(binding.viewFinder.surfaceProvider) }
+            .also { it.setSurfaceProvider(binding.frontViewFinder.surfaceProvider) }
 
         val detectorOptions = FaceDetectorOptions.Builder()
             .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_ACCURATE)
@@ -170,7 +189,52 @@ class MainActivity : AppCompatActivity() {
         )
         imageAnalysis.setAnalyzer(cameraExecutor, analyzer!!)
 
-        provider.bindToLifecycle(this, CameraSelector.DEFAULT_FRONT_CAMERA, preview, imageAnalysis)
+        val frontUseCases = arrayOf<UseCase>(frontPreview, imageAnalysis)
+        try {
+            provider.bindToLifecycle(this, CameraSelector.DEFAULT_FRONT_CAMERA, *frontUseCases)
+        } catch (exception: Exception) {
+            handleDriverState(DriverState.Error(exception.localizedMessage ?: getString(R.string.status_error)))
+        }
+
+        val rearPreview = Preview.Builder()
+            .setTargetAspectRatio(AspectRatio.RATIO_4_3)
+            .setTargetRotation(binding.rearViewFinder.display?.rotation ?: Surface.ROTATION_0)
+            .build()
+            .also { it.setSurfaceProvider(binding.rearViewFinder.surfaceProvider) }
+
+        val rearUseCases = mutableListOf<UseCase>(rearPreview)
+
+        if (roadDetectionEnabled) {
+            ensureRoadObjectDetector()
+            val rearImageAnalysis = ImageAnalysis.Builder()
+                .setTargetAspectRatio(AspectRatio.RATIO_4_3)
+                .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                .build()
+            roadObjectAnalyzer = RoadObjectAnalyzer(
+                detector = roadObjectDetector!!,
+                mainExecutor = mainThreadExecutor,
+                onDetectionsUpdated = ::onRoadDetectionsUpdated
+            )
+            rearImageAnalysis.setAnalyzer(cameraExecutor, roadObjectAnalyzer!!)
+            rearUseCases.add(rearImageAnalysis)
+        } else {
+            roadObjectAnalyzer = null
+            releaseRoadObjectDetector()
+            binding.rearOverlay.clearDetections()
+        }
+
+        try {
+            provider.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, *rearUseCases.toTypedArray())
+        } catch (exception: Exception) {
+            binding.rearOverlay.clearDetections()
+            releaseRoadObjectDetector()
+        }
+    }
+
+    private fun onRoadDetectionsUpdated(detections: List<RoadObjectDetection>) {
+        if (roadDetectionEnabled) {
+            binding.rearOverlay.updateDetections(detections)
+        }
     }
 
     private fun handleDriverState(state: DriverState) {
@@ -294,6 +358,24 @@ class MainActivity : AppCompatActivity() {
         analyzer = null
         faceDetector?.close()
         faceDetector = null
+        roadObjectAnalyzer = null
+        releaseRoadObjectDetector()
+        binding.rearOverlay.clearDetections()
+    }
+
+    private fun ensureRoadObjectDetector() {
+        if (roadObjectDetector != null) return
+        val options = ObjectDetectorOptions.Builder()
+            .setDetectorMode(ObjectDetectorOptions.STREAM_MODE)
+            .enableMultipleObjects()
+            .enableClassification()
+            .build()
+        roadObjectDetector = ObjectDetection.getClient(options)
+    }
+
+    private fun releaseRoadObjectDetector() {
+        roadObjectDetector?.close()
+        roadObjectDetector = null
     }
 
     companion object {
@@ -303,6 +385,7 @@ class MainActivity : AppCompatActivity() {
         private const val TONE_VOLUME = 100
         private const val PREFS_NAME = "drivesense_settings"
         private const val KEY_REQUIRE_DRIVING_CHECK = "require_driving_check"
+        private const val KEY_ROAD_DETECTION_ENABLED = "road_detection_enabled"
     }
 }
 
