@@ -30,6 +30,9 @@ import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.core.content.ContextCompat
 import androidx.core.content.edit
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleOwner
+import androidx.lifecycle.LifecycleRegistry
 import com.drivesense.drivesense.databinding.ActivityMainBinding
 import com.drivesense.drivesense.ui.DetectionOverlayView.RoadObjectDetection
 import com.google.mlkit.vision.face.FaceDetection
@@ -49,6 +52,9 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityMainBinding
     private lateinit var cameraExecutor: ExecutorService
+
+    private val frontCameraLifecycleOwner = ManualLifecycleOwner()
+    private val rearCameraLifecycleOwner = ManualLifecycleOwner()
 
     private var cameraProvider: ProcessCameraProvider? = null
     private var faceDetector: FaceDetector? = null
@@ -92,6 +98,9 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
+
+        frontCameraLifecycleOwner.onCreate()
+        rearCameraLifecycleOwner.onCreate()
 
         binding.frontViewFinder.implementationMode =
             PreviewView.ImplementationMode.COMPATIBLE
@@ -149,8 +158,16 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    override fun onStart() {
+        super.onStart()
+        frontCameraLifecycleOwner.onStart()
+        rearCameraLifecycleOwner.onStart()
+    }
+
     override fun onResume() {
         super.onResume()
+        frontCameraLifecycleOwner.onResume()
+        rearCameraLifecycleOwner.onResume()
         ensureDrivingStatusMonitorStarted()
         if (hasCameraPermission()) {
             bindUseCases()
@@ -159,7 +176,15 @@ class MainActivity : AppCompatActivity() {
 
     override fun onPause() {
         super.onPause()
+        rearCameraLifecycleOwner.onPause()
+        frontCameraLifecycleOwner.onPause()
         drivingStatusMonitor.stop()
+    }
+
+    override fun onStop() {
+        super.onStop()
+        rearCameraLifecycleOwner.onStop()
+        frontCameraLifecycleOwner.onStop()
     }
 
     override fun onDestroy() {
@@ -167,6 +192,8 @@ class MainActivity : AppCompatActivity() {
         releaseCamera()
         cameraExecutor.shutdown()
         toneGenerator?.release()
+        rearCameraLifecycleOwner.onDestroy()
+        frontCameraLifecycleOwner.onDestroy()
     }
 
     private fun hasCameraPermission(): Boolean {
@@ -233,11 +260,7 @@ class MainActivity : AppCompatActivity() {
         return ViewPort.Builder(
             Rational(previewView.width, previewView.height),
             previewView.display?.rotation ?: Surface.ROTATION_0
-        ).apply {
-            if (supportsConcurrentCameras) {
-                setCameraMode(ViewPort.CameraMode.CONCURRENT)
-            }
-        }.build()
+        ).build()
     }
 
     private fun bindUseCasesInternal(provider: ProcessCameraProvider) {
@@ -296,7 +319,7 @@ class MainActivity : AppCompatActivity() {
             binding.rearOverlay.clearDetections()
             updateRearCameraUiVisibility(false)
             try {
-                frontCamera = provider.bindToLifecycle(this@MainActivity, frontCameraSelector, frontGroup)
+                frontCamera = provider.bindToLifecycle(frontCameraLifecycleOwner, frontCameraSelector, frontGroup)
             } catch (exception: Exception) {
                 handleDriverState(DriverState.Error(exception.localizedMessage ?: getString(R.string.status_error)))
             }
@@ -349,7 +372,7 @@ class MainActivity : AppCompatActivity() {
         var rearCameraBound = false
         var roadDetectionFallbackAttempted = false
         try {
-            rearCamera = provider.bindToLifecycle(this@MainActivity, rearCameraSelector, rearGroup)
+            rearCamera = provider.bindToLifecycle(rearCameraLifecycleOwner, rearCameraSelector, rearGroup)
             rearCameraBound = true
         } catch (exception: Exception) {
             Log.w(TAG, "Failed to bind rear camera use cases", exception)
@@ -363,7 +386,7 @@ class MainActivity : AppCompatActivity() {
                     .setViewPort(rearViewport)
                     .build()
                 try {
-                    rearCamera = provider.bindToLifecycle(this@MainActivity, rearCameraSelector, fallbackRearGroup)
+                    rearCamera = provider.bindToLifecycle(rearCameraLifecycleOwner, rearCameraSelector, fallbackRearGroup)
                     rearCameraBound = true
                 } catch (fallbackException: Exception) {
                     Log.e(TAG, "Failed to bind rear camera preview only fallback", fallbackException)
@@ -376,7 +399,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         try {
-            frontCamera = provider.bindToLifecycle(this@MainActivity, frontCameraSelector, frontGroup)
+            frontCamera = provider.bindToLifecycle(frontCameraLifecycleOwner, frontCameraSelector, frontGroup)
         } catch (exception: Exception) {
             handleDriverState(DriverState.Error(exception.localizedMessage ?: getString(R.string.status_error)))
         }
@@ -689,6 +712,20 @@ class MainActivity : AppCompatActivity() {
         private const val KEY_ROAD_DETECTION_ENABLED = "road_detection_enabled"
         private val TARGET_RESOLUTION = Size(1280, 960)
     }
+}
+
+private class ManualLifecycleOwner : LifecycleOwner {
+    private val registry = LifecycleRegistry(this)
+
+    override val lifecycle: Lifecycle
+        get() = registry
+
+    fun onCreate() = registry.handleLifecycleEvent(Lifecycle.Event.ON_CREATE)
+    fun onStart() = registry.handleLifecycleEvent(Lifecycle.Event.ON_START)
+    fun onResume() = registry.handleLifecycleEvent(Lifecycle.Event.ON_RESUME)
+    fun onPause() = registry.handleLifecycleEvent(Lifecycle.Event.ON_PAUSE)
+    fun onStop() = registry.handleLifecycleEvent(Lifecycle.Event.ON_STOP)
+    fun onDestroy() = registry.handleLifecycleEvent(Lifecycle.Event.ON_DESTROY)
 }
 
 
