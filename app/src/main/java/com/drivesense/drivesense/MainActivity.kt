@@ -439,7 +439,8 @@ class MainActivity : AppCompatActivity() {
 private class ManualLifecycleOwner : LifecycleOwner {
     private val lifecycleRegistry = LifecycleRegistry(this)
 
-    override fun getLifecycle(): Lifecycle = lifecycleRegistry
+    override val lifecycle: Lifecycle
+        get() = lifecycleRegistry
 
     fun onCreate() {
         lifecycleRegistry.currentState = Lifecycle.State.CREATED
