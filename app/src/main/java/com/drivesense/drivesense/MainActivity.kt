@@ -192,6 +192,7 @@ class MainActivity : AppCompatActivity() {
                 val provider = future.get()
                 cameraProvider = provider
                 supportsConcurrentCameras = provider.isConcurrentCameraModeSupportedCompat()
+                Log.i(TAG, "CameraX concurrent camera support reported as $supportsConcurrentCameras")
                 updateConcurrentCameraAvailability()
                 bindUseCases()
             } catch (exception: Exception) {
@@ -453,6 +454,7 @@ class MainActivity : AppCompatActivity() {
             Log.i(TAG, "Device does not report FEATURE_CAMERA_CONCURRENT")
             return false
         }
+        Log.i(TAG, "Device reports FEATURE_CAMERA_CONCURRENT")
 
         val cameraManager = getSystemService(Context.CAMERA_SERVICE) as? CameraManager
         if (cameraManager == null) {
@@ -475,9 +477,19 @@ class MainActivity : AppCompatActivity() {
             return false
         }
 
+        Log.i(
+            TAG,
+            "CameraManager reports ${concurrentCameraIds.size} concurrent camera combination(s): " +
+                concurrentCameraIds.joinToString(prefix = "[", postfix = "]") { combo ->
+                    combo.joinToString(prefix = "[", postfix = "]")
+                }
+        )
+
         val availableCameraIds = availableCameraInfos
             .map { info -> Camera2CameraInfo.from(info).cameraId }
             .toSet()
+
+        Log.i(TAG, "CameraX reports available camera ids: $availableCameraIds")
 
         for (combo in concurrentCameraIds) {
             if (combo.size < 2) continue
@@ -492,6 +504,7 @@ class MainActivity : AppCompatActivity() {
                     Log.w(TAG, "Unable to read lens facing for camera $cameraId", error)
                     null
                 }
+                Log.d(TAG, "Evaluating concurrent combo cameraId=$cameraId lensFacing=$lensFacing")
                 when (lensFacing) {
                     CameraCharacteristics.LENS_FACING_FRONT -> if (frontId == null) frontId = cameraId
                     CameraCharacteristics.LENS_FACING_BACK -> if (backId == null) backId = cameraId
@@ -501,6 +514,7 @@ class MainActivity : AppCompatActivity() {
                 concurrentFrontCameraId = frontId
                 concurrentBackCameraId = backId
                 Log.i(TAG, "Concurrent camera combo selected: front=$frontId back=$backId")
+                Log.i(TAG, "Dual camera support confirmed via Camera2 concurrent combo")
                 return true
             }
         }
