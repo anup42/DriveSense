@@ -434,10 +434,19 @@ class MainActivity : AppCompatActivity() {
 
     private fun ProcessCameraProvider.isConcurrentCameraModeSupportedCompat(): Boolean {
         return try {
-            isConcurrentCameraModeSupported(
+            val method = ProcessCameraProvider::class.java.getMethod(
+                "isConcurrentCameraModeSupported",
+                CameraSelector::class.java,
+                CameraSelector::class.java
+            )
+            method.invoke(
+                this,
                 CameraSelector.DEFAULT_FRONT_CAMERA,
                 CameraSelector.DEFAULT_BACK_CAMERA
-            )
+            ) as Boolean
+        } catch (error: NoSuchMethodException) {
+            Log.w(TAG, "Concurrent camera mode support check unavailable", error)
+            false
         } catch (error: NoSuchMethodError) {
             Log.w(TAG, "Concurrent camera mode support check unavailable", error)
             false
