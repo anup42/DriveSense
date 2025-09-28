@@ -27,6 +27,7 @@ import androidx.camera.core.Preview
 import androidx.camera.core.UseCaseGroup
 import androidx.camera.core.ViewPort
 import androidx.camera.lifecycle.ProcessCameraProvider
+import androidx.camera.view.PreviewView
 import androidx.core.content.ContextCompat
 import androidx.core.content.edit
 import androidx.lifecycle.Lifecycle
@@ -102,13 +103,13 @@ class MainActivity : AppCompatActivity() {
         rearCameraLifecycleOwner.onCreate()
 
         binding.frontViewFinder.implementationMode =
-            androidx.camera.view.PreviewView.ImplementationMode.COMPATIBLE
+            PreviewView.ImplementationMode.COMPATIBLE
         binding.frontViewFinder.scaleType =
-            androidx.camera.view.PreviewView.ScaleType.FILL_CENTER
+            PreviewView.ScaleType.FILL_CENTER
         binding.rearViewFinder.implementationMode =
-            androidx.camera.view.PreviewView.ImplementationMode.COMPATIBLE
+            PreviewView.ImplementationMode.COMPATIBLE
         binding.rearViewFinder.scaleType =
-            androidx.camera.view.PreviewView.ScaleType.FILL_CENTER
+            PreviewView.ScaleType.FILL_CENTER
 
         cameraExecutor = Executors.newSingleThreadExecutor()
         binding.lastEventText.visibility = View.GONE
@@ -255,6 +256,17 @@ class MainActivity : AppCompatActivity() {
         return view.width > 0 && view.height > 0
     }
 
+    private fun createViewPort(previewView: PreviewView): ViewPort {
+        val builder = ViewPort.Builder(
+            Rational(previewView.width, previewView.height),
+            previewView.display?.rotation ?: Surface.ROTATION_0
+        )
+        if (supportsConcurrentCameras) {
+            builder.setCameraMode(ViewPort.CameraMode.CONCURRENT)
+        }
+        return builder.build()
+    }
+
     private fun bindUseCasesInternal(provider: ProcessCameraProvider) {
         provider.unbindAll()
 
@@ -294,10 +306,7 @@ class MainActivity : AppCompatActivity() {
         )
         imageAnalysis.setAnalyzer(cameraExecutor, analyzer!!)
 
-        val frontViewport = ViewPort.Builder(
-            Rational(binding.frontViewFinder.width, binding.frontViewFinder.height),
-            binding.frontViewFinder.display?.rotation ?: Surface.ROTATION_0
-        ).build()
+        val frontViewport = createViewPort(binding.frontViewFinder)
 
         val frontGroup = UseCaseGroup.Builder()
             .addUseCase(frontPreview)
@@ -336,10 +345,7 @@ class MainActivity : AppCompatActivity() {
 
         val rearCameraSelector = getRearCameraSelector()
 
-        val rearViewport = ViewPort.Builder(
-            Rational(binding.rearViewFinder.width, binding.rearViewFinder.height),
-            binding.rearViewFinder.display?.rotation ?: Surface.ROTATION_0
-        ).build()
+        val rearViewport = createViewPort(binding.rearViewFinder)
 
         val rearGroupBuilder = UseCaseGroup.Builder()
             .addUseCase(rearPreview)
