@@ -186,7 +186,7 @@ class MainActivity : AppCompatActivity() {
             try {
                 val provider = future.get()
                 cameraProvider = provider
-                supportsConcurrentCameras = provider.isConcurrentCameraModeSupported
+                supportsConcurrentCameras = provider.isConcurrentCameraModeSupportedCompat()
                 updateConcurrentCameraAvailability()
                 bindUseCases()
             } catch (exception: Exception) {
@@ -430,6 +430,18 @@ class MainActivity : AppCompatActivity() {
         roadObjectAnalyzer = null
         releaseRoadObjectDetector()
         binding.rearOverlay.clearDetections()
+    }
+
+    private fun ProcessCameraProvider.isConcurrentCameraModeSupportedCompat(): Boolean {
+        return try {
+            val method = ProcessCameraProvider::class.java.getMethod("isConcurrentCameraModeSupported")
+            method.invoke(this) as? Boolean ?: false
+        } catch (_: NoSuchMethodException) {
+            false
+        } catch (exception: Exception) {
+            Log.w(TAG, "Unable to query concurrent camera mode support", exception)
+            false
+        }
     }
 
     private fun ensureRoadObjectDetector() {
