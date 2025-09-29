@@ -208,21 +208,23 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun runWhenPreviewViewsReady(action: () -> Unit) {
-        val frontReady = isPreviewViewReady(binding.frontViewFinder)
-        val rearRequired = supportsConcurrentCameras
+        val frontRequired = !(supportsConcurrentCameras && roadDetectionEnabled)
+        val frontReady = !frontRequired || isPreviewViewReady(binding.frontViewFinder)
+        val rearRequired = supportsConcurrentCameras && roadDetectionEnabled
         val rearReady = !rearRequired || isPreviewViewReady(binding.rearViewFinder)
         if (frontReady && rearReady) {
             action()
             return
         }
         binding.frontViewFinder.post {
-            val frontPostReady = isPreviewViewReady(binding.frontViewFinder)
+            val frontPostReady = !frontRequired || isPreviewViewReady(binding.frontViewFinder)
             val rearPostReady = !rearRequired || isPreviewViewReady(binding.rearViewFinder)
             if (frontPostReady && rearPostReady) {
                 action()
             } else if (rearRequired) {
                 binding.rearViewFinder.post {
-                    if (isPreviewViewReady(binding.frontViewFinder) && isPreviewViewReady(binding.rearViewFinder)) {
+                    val finalFrontReady = !frontRequired || isPreviewViewReady(binding.frontViewFinder)
+                    if (finalFrontReady && isPreviewViewReady(binding.rearViewFinder)) {
                         action()
                     }
                 }
@@ -258,7 +260,7 @@ class MainActivity : AppCompatActivity() {
         )
 
         if (supportsConcurrentCameras && roadDetectionEnabled) {
-            binding.frontPreviewContainer.visibility = View.INVISIBLE
+            binding.frontPreviewContainer.visibility = View.GONE
             updateRearCameraUiVisibility(true)
             if (bindRearCameraWithFrontPipeline(provider)) {
                 observeFrontCameraState(null)
@@ -311,6 +313,7 @@ class MainActivity : AppCompatActivity() {
 
         try {
             val frontCamera = provider.bindToLifecycle(this, getFrontCameraSelector(), frontGroup)
+            logBound(frontCamera, "FRONT")
             observeFrontCameraState(frontCamera)
             observeRearCameraState(null)
         } catch (exception: Exception) {
@@ -359,6 +362,7 @@ class MainActivity : AppCompatActivity() {
 
         return try {
             val rearCamera = provider.bindToLifecycle(this, getRearCameraSelector(), rearGroup)
+            logBound(rearCamera, "REAR")
             observeRearCameraState(rearCamera)
             startFrontCamera2Pipeline()
             true
@@ -372,27 +376,22 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun startFrontCamera2Pipeline() {
-        if (analyzer == null) {
+        val currentAnalyzer = analyzer
+        if (currentAnalyzer == null) {
             Log.w(TAG, "Analyzer unavailable; cannot start front Camera2 pipeline")
             return
         }
 
-        var pipeline: FrontCamera2Pipeline? = null
-        pipeline = FrontCamera2Pipeline(
+        val pipeline = FrontCamera2Pipeline(
             context = this,
             targetSize = Size(320, 240)
         ) { image, rotationDegrees ->
-            val activePipeline = pipeline
+            val activePipeline = frontCam2
             if (activePipeline == null) {
                 try {
                     image.close()
                 } catch (_: Throwable) {
                 }
-                return@FrontCamera2Pipeline
-            }
-            val currentAnalyzer = analyzer
-            if (currentAnalyzer == null) {
-                activePipeline.markFrameDone(image)
                 return@FrontCamera2Pipeline
             }
             try {
@@ -675,33 +674,72 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun getFrontCameraSelector(): CameraSelector {
-        return createCameraSelector(concurrentFrontCameraId, CameraSelector.DEFAULT_FRONT_CAMERA)
+        val provider = cameraProvider
+        concurrentFrontCameraId?.let { id ->
+            return CameraSelector.Builder()
+                .addCameraFilter { infos ->
+                    infos.filter { Camera2CameraInfo.from(it).cameraId == id }
+                        .ifEmpty { infos }
+                }
+                .build()
+        }
+
+        val frontId = provider?.availableCameraInfos
+            ?.map { Camera2CameraInfo.from(it) }
+            ?.firstOrNull {
+                it.getCameraCharacteristic(CameraCharacteristics.LENS_FACING) ==
+                    CameraCharacteristics.LENS_FACING_FRONT
+            }
+            ?.cameraId
+
+        return if (frontId != null) {
+            CameraSelector.Builder()
+                .addCameraFilter { infos ->
+                    infos.filter { Camera2CameraInfo.from(it).cameraId == frontId }
+                }
+                .build()
+        } else {
+            CameraSelector.DEFAULT_FRONT_CAMERA
+        }
     }
 
     private fun getRearCameraSelector(): CameraSelector {
-        return createCameraSelector(concurrentBackCameraId, CameraSelector.DEFAULT_BACK_CAMERA)
+        val provider = cameraProvider
+        concurrentBackCameraId?.let { id ->
+            return CameraSelector.Builder()
+                .addCameraFilter { infos ->
+                    infos.filter { Camera2CameraInfo.from(it).cameraId == id }
+                        .ifEmpty { infos }
+                }
+                .build()
+        }
+
+        val backId = provider?.availableCameraInfos
+            ?.map { Camera2CameraInfo.from(it) }
+            ?.firstOrNull {
+                it.getCameraCharacteristic(CameraCharacteristics.LENS_FACING) ==
+                    CameraCharacteristics.LENS_FACING_BACK
+            }
+            ?.cameraId
+
+        return if (backId != null) {
+            CameraSelector.Builder()
+                .addCameraFilter { infos ->
+                    infos.filter { Camera2CameraInfo.from(it).cameraId == backId }
+                }
+                .build()
+        } else {
+            CameraSelector.DEFAULT_BACK_CAMERA
+        }
     }
 
-    private fun createCameraSelector(cameraId: String?, defaultSelector: CameraSelector): CameraSelector {
-        if (cameraId.isNullOrEmpty()) {
-            return defaultSelector
-        }
-        val provider = cameraProvider ?: return defaultSelector
-        val hasMatchingCamera = provider.availableCameraInfos.any { info ->
-            Camera2CameraInfo.from(info).cameraId == cameraId
-        }
-        if (!hasMatchingCamera) {
-            Log.w(TAG, "Camera id $cameraId not found in availableCameraInfos; falling back to default selector")
-            return defaultSelector
-        }
-        return CameraSelector.Builder()
-            .addCameraFilter { cameraInfos ->
-                val matchedInfos = cameraInfos.filter { info ->
-                    Camera2CameraInfo.from(info).cameraId == cameraId
-                }
-                if (matchedInfos.isEmpty()) cameraInfos else matchedInfos
-            }
-            .build()
+    private fun logBound(camera: Camera?, label: String) {
+        camera ?: return
+        val info = camera.cameraInfo
+        val id = Camera2CameraInfo.from(info).cameraId
+        val facing = Camera2CameraInfo.from(info)
+            .getCameraCharacteristic(CameraCharacteristics.LENS_FACING)
+        Log.i(TAG, "$label bound to cameraId=$id facing=$facing")
     }
 
     private fun ensureRoadObjectDetector() {
