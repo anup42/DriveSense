@@ -62,15 +62,20 @@ class MainActivity : AppCompatActivity() {
     private var drivingDetectionStatus: DrivingDetectionStatus = DrivingDetectionStatus.UNKNOWN
     private var requireDrivingCheck: Boolean = true
     private var roadDetectionEnabled: Boolean = false
+    private var showFrontPreview: Boolean = true
+    private var showRearPreview: Boolean = true
     private var latestDriverState: DriverState = DriverState.Initializing
     private var supportsConcurrentCameras: Boolean = false
     private var suppressRoadDetectionSwitchChange = false
+    private var suppressFrontPreviewSwitchChange = false
+    private var suppressRearPreviewSwitchChange = false
     private var concurrentFrontCameraId: String? = null
     private var concurrentBackCameraId: String? = null
     private var frontCam2: FrontCamera2Pipeline? = null
     private var frontPreviewResolution: Size? = null
     private var rearPreviewResolution: Size? = null
     private var frontPreviewGuidelinePercent: Float? = null
+    private var rearPreviewAvailable: Boolean = false
 
     private val permissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
@@ -111,11 +116,33 @@ class MainActivity : AppCompatActivity() {
         binding.lastEventText.visibility = View.GONE
         requireDrivingCheck = settings.getBoolean(KEY_REQUIRE_DRIVING_CHECK, true)
         roadDetectionEnabled = settings.getBoolean(KEY_ROAD_DETECTION_ENABLED, false)
+        showFrontPreview = settings.getBoolean(KEY_SHOW_FRONT_PREVIEW, true)
+        showRearPreview = settings.getBoolean(KEY_SHOW_REAR_PREVIEW, true)
         drivingStatusMonitor = DrivingStatusMonitor(
             context = this,
             callbackExecutor = mainThreadExecutor,
             onStatusChanged = ::onDrivingStatusChanged
         )
+
+        setFrontPreviewSwitchChecked(showFrontPreview)
+        binding.frontPreviewSwitch.setOnCheckedChangeListener { _, isChecked ->
+            if (suppressFrontPreviewSwitchChange) {
+                return@setOnCheckedChangeListener
+            }
+            showFrontPreview = isChecked
+            settings.edit { putBoolean(KEY_SHOW_FRONT_PREVIEW, isChecked) }
+            applyFrontPreviewVisibility()
+        }
+
+        setRearPreviewSwitchChecked(showRearPreview)
+        binding.rearPreviewSwitch.setOnCheckedChangeListener { _, isChecked ->
+            if (suppressRearPreviewSwitchChange) {
+                return@setOnCheckedChangeListener
+            }
+            showRearPreview = isChecked
+            settings.edit { putBoolean(KEY_SHOW_REAR_PREVIEW, isChecked) }
+            applyRearPreviewVisibility()
+        }
 
         binding.drivingCheckSwitch.isChecked = requireDrivingCheck
         binding.drivingCheckSwitch.setOnCheckedChangeListener { _, isChecked ->
@@ -144,6 +171,9 @@ class MainActivity : AppCompatActivity() {
             }
             bindUseCases()
         }
+
+        applyFrontPreviewVisibility()
+        applyRearPreviewVisibility()
 
         handleDriverState(DriverState.Initializing)
 
@@ -202,11 +232,9 @@ class MainActivity : AppCompatActivity() {
 
     private fun bindUseCases() {
         val provider = cameraProvider ?: return
-        if (!supportsConcurrentCameras) {
-            updateRearCameraUiVisibility(false)
-        } else {
-            updateRearCameraUiVisibility(true)
-        }
+        val rearAvailable = supportsConcurrentCameras && roadDetectionEnabled
+        setRearPreviewAvailability(rearAvailable)
+        applyFrontPreviewVisibility()
         runWhenPreviewViewsReady {
             bindUseCasesInternal(provider)
         }
@@ -215,7 +243,7 @@ class MainActivity : AppCompatActivity() {
     private fun runWhenPreviewViewsReady(action: () -> Unit) {
         val frontRequired = !(supportsConcurrentCameras && roadDetectionEnabled)
         val frontReady = !frontRequired || isPreviewViewReady(binding.frontViewFinder)
-        val rearRequired = supportsConcurrentCameras && roadDetectionEnabled
+        val rearRequired = supportsConcurrentCameras && roadDetectionEnabled && showRearPreview
         val rearReady = !rearRequired || isPreviewViewReady(binding.rearViewFinder)
         if (frontReady && rearReady) {
             action()
@@ -265,8 +293,8 @@ class MainActivity : AppCompatActivity() {
         )
 
         if (supportsConcurrentCameras && roadDetectionEnabled) {
-            binding.frontPreviewContainer.visibility = View.GONE
-            updateRearCameraUiVisibility(true)
+            applyFrontPreviewVisibility()
+            applyRearPreviewVisibility()
             if (bindRearCameraWithFrontPipeline(provider)) {
                 observeFrontCameraState(null)
                 return
@@ -276,10 +304,11 @@ class MainActivity : AppCompatActivity() {
             roadDetectionEnabled = false
             settings.edit { putBoolean(KEY_ROAD_DETECTION_ENABLED, false) }
             setRoadDetectionSwitchChecked(false)
+            setRearPreviewAvailability(false)
         }
 
-        binding.frontPreviewContainer.visibility = View.VISIBLE
-        updateRearCameraUiVisibility(false)
+        applyFrontPreviewVisibility()
+        setRearPreviewAvailability(false)
         bindFrontCameraOnly(provider)
     }
 
@@ -779,6 +808,9 @@ class MainActivity : AppCompatActivity() {
             settings.edit { putBoolean(KEY_ROAD_DETECTION_ENABLED, false) }
             setRoadDetectionSwitchChecked(false)
         }
+        if (!supportsConcurrentCameras) {
+            setRearPreviewAvailability(false)
+        }
     }
 
     private fun setRoadDetectionSwitchChecked(checked: Boolean) {
@@ -788,8 +820,53 @@ class MainActivity : AppCompatActivity() {
         suppressRoadDetectionSwitchChange = false
     }
 
-    private fun updateRearCameraUiVisibility(showRearPreview: Boolean) {
-        binding.rearPreviewContainer.visibility = if (showRearPreview) View.VISIBLE else View.GONE
+    private fun setFrontPreviewSwitchChecked(checked: Boolean) {
+        if (binding.frontPreviewSwitch.isChecked == checked) return
+        suppressFrontPreviewSwitchChange = true
+        binding.frontPreviewSwitch.isChecked = checked
+        suppressFrontPreviewSwitchChange = false
+    }
+
+    private fun setRearPreviewSwitchChecked(checked: Boolean) {
+        if (binding.rearPreviewSwitch.isChecked == checked) return
+        suppressRearPreviewSwitchChange = true
+        binding.rearPreviewSwitch.isChecked = checked
+        suppressRearPreviewSwitchChange = false
+    }
+
+    private fun setRearPreviewAvailability(available: Boolean) {
+        rearPreviewAvailable = available
+        binding.rearPreviewSwitch.isEnabled = available
+        if (!available) {
+            setRearPreviewSwitchChecked(false)
+            binding.rearPreviewContainer.visibility = View.GONE
+            applyFrontPreviewGuidelinePercent()
+        } else {
+            setRearPreviewSwitchChecked(showRearPreview)
+            applyRearPreviewVisibility()
+        }
+    }
+
+    private fun applyFrontPreviewVisibility() {
+        binding.frontPreviewContainer.visibility =
+            if (showFrontPreview) View.VISIBLE else View.INVISIBLE
+        if (showFrontPreview) {
+            if (!rearPreviewAvailable || !showRearPreview) {
+                applyFrontPreviewGuidelinePercent()
+            }
+        } else {
+            applyFrontPreviewGuidelinePercent()
+        }
+    }
+
+    private fun applyRearPreviewVisibility() {
+        if (!rearPreviewAvailable) {
+            binding.rearPreviewContainer.visibility = View.GONE
+            applyFrontPreviewGuidelinePercent()
+            return
+        }
+        binding.rearPreviewContainer.visibility =
+            if (showRearPreview) View.VISIBLE else View.INVISIBLE
         if (showRearPreview) {
             binding.midGuideline.setGuidelinePercent(0.5f)
         } else {
@@ -851,6 +928,8 @@ class MainActivity : AppCompatActivity() {
         private const val PREFS_NAME = "drivesense_settings"
         private const val KEY_REQUIRE_DRIVING_CHECK = "require_driving_check"
         private const val KEY_ROAD_DETECTION_ENABLED = "road_detection_enabled"
+        private const val KEY_SHOW_FRONT_PREVIEW = "show_front_preview"
+        private const val KEY_SHOW_REAR_PREVIEW = "show_rear_preview"
         private val ANALYSIS_TARGET_RESOLUTION = Size(640, 480)
     }
 }
