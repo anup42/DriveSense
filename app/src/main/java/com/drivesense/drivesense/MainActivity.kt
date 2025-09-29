@@ -371,8 +371,12 @@ class MainActivity : AppCompatActivity() {
         }
 
         val rearSurfaceProvider = binding.rearViewFinder.surfaceProvider
+        val preferredRearCameraId = concurrentBackCameraId ?: findWidestBackCameraId(provider)
         val configuredRearResolution = rearPreviewResolution
-            ?: findHighestPreviewResolution(CameraCharacteristics.LENS_FACING_BACK)
+            ?: findHighestPreviewResolution(
+                CameraCharacteristics.LENS_FACING_BACK,
+                preferredRearCameraId
+            )
                 ?.also { rearPreviewResolution = it }
         val rearPreviewBuilder = Preview.Builder()
         configuredRearResolution?.let { rearPreviewBuilder.setTargetResolution(it) }
@@ -758,13 +762,7 @@ class MainActivity : AppCompatActivity() {
                 .build()
         }
 
-        val backId = provider?.availableCameraInfos
-            ?.map { Camera2CameraInfo.from(it) }
-            ?.firstOrNull {
-                it.getCameraCharacteristic(CameraCharacteristics.LENS_FACING) ==
-                    CameraCharacteristics.LENS_FACING_BACK
-            }
-            ?.cameraId
+        val backId = findWidestBackCameraId(provider)
 
         return if (backId != null) {
             CameraSelector.Builder()
@@ -898,10 +896,14 @@ class MainActivity : AppCompatActivity() {
         binding.midGuideline.setGuidelinePercent(percent)
     }
 
-    private fun findHighestPreviewResolution(lensFacing: Int): Size? {
+    private fun findHighestPreviewResolution(
+        lensFacing: Int,
+        specificCameraId: String? = null
+    ): Size? {
         val cameraManager = getSystemService(Context.CAMERA_SERVICE) as? CameraManager ?: return null
         var bestSize: Size? = null
         for (cameraId in cameraManager.cameraIdList) {
+            if (specificCameraId != null && cameraId != specificCameraId) continue
             val characteristics = cameraManager.getCameraCharacteristics(cameraId)
             val facing = characteristics.get(CameraCharacteristics.LENS_FACING)
             if (facing != lensFacing) continue
@@ -917,6 +919,35 @@ class MainActivity : AppCompatActivity() {
             }
         }
         return bestSize
+    }
+
+    private fun findWidestBackCameraId(provider: ProcessCameraProvider?): String? {
+        provider ?: return null
+        var fallbackId: String? = null
+        var widestId: String? = null
+        var smallestFocalLength: Float? = null
+        for (info in provider.availableCameraInfos) {
+            val cameraInfo = Camera2CameraInfo.from(info)
+            val facing = cameraInfo.getCameraCharacteristic(CameraCharacteristics.LENS_FACING)
+            if (facing != CameraCharacteristics.LENS_FACING_BACK) {
+                continue
+            }
+            val cameraId = cameraInfo.cameraId
+            if (fallbackId == null) {
+                fallbackId = cameraId
+            }
+            val focalLengths = cameraInfo
+                .getCameraCharacteristic(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)
+            val minFocalLength = focalLengths?.minOrNull()
+            if (minFocalLength != null) {
+                val currentBest = smallestFocalLength
+                if (currentBest == null || minFocalLength < currentBest) {
+                    smallestFocalLength = minFocalLength
+                    widestId = cameraId
+                }
+            }
+        }
+        return widestId ?: fallbackId
     }
 
     companion object {
