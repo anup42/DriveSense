@@ -17,7 +17,7 @@ import androidx.core.content.ContextCompat
 
 class FrontCamera2Pipeline(
     private val context: Context,
-    private val targetSize: Size = Size(320, 240),
+    private val targetSizeHint: Size? = null,
     private val maxImages: Int = 2,
     private val desiredFps: Range<Int> = Range(15, 30),
     private val onFrame: (image: Image, rotationDegrees: Int) -> Unit
@@ -37,6 +37,7 @@ class FrontCamera2Pipeline(
     private var characteristics: CameraCharacteristics? = null
 
     private var processing = false
+    private var targetSize: Size = Size(320, 240)
 
     fun start(displayRotation: Int = Surface.ROTATION_0) {
         if (!hasPermission()) return
@@ -46,7 +47,10 @@ class FrontCamera2Pipeline(
         startBgThread()
 
         cameraId = findFrontCameraId() ?: return
-        characteristics = cameraManager.getCameraCharacteristics(cameraId!!)
+        val chars = cameraManager.getCameraCharacteristics(cameraId!!)
+        characteristics = chars
+
+        targetSize = selectTargetSize(chars)
         imageReader = ImageReader.newInstance(
             targetSize.width,
             targetSize.height,
@@ -195,6 +199,19 @@ class FrontCamera2Pipeline(
         }
         bgThread = null
         bgHandler = null
+    }
+
+    private fun selectTargetSize(chars: CameraCharacteristics): Size {
+        targetSizeHint?.let { return it }
+
+        val map = chars.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+        val availableSizes = map?.getOutputSizes(ImageFormat.YUV_420_888)
+
+        if (availableSizes.isNullOrEmpty()) {
+            return Size(320, 240)
+        }
+
+        return availableSizes.maxByOrNull { it.width.toLong() * it.height.toLong() } ?: Size(320, 240)
     }
 
     fun markFrameDone(image: Image) {

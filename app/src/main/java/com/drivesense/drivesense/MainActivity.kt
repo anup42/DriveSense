@@ -383,8 +383,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         val pipeline = FrontCamera2Pipeline(
-            context = this,
-            targetSize = Size(320, 240)
+            context = this
         ) { image, rotationDegrees ->
             val activePipeline = frontCam2
             if (activePipeline == null) {
