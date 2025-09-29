@@ -24,11 +24,11 @@ import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.Preview
 import androidx.camera.core.UseCaseGroup
-import androidx.camera.core.concurrent.ConcurrentCamera
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.core.content.ContextCompat
 import androidx.core.content.edit
+import com.drivesense.drivesense.camera2.FrontCamera2Pipeline
 import com.drivesense.drivesense.databinding.ActivityMainBinding
 import com.drivesense.drivesense.ui.DetectionOverlayView.RoadObjectDetection
 import com.google.mlkit.vision.face.FaceDetection
@@ -65,6 +65,7 @@ class MainActivity : AppCompatActivity() {
     private var suppressRoadDetectionSwitchChange = false
     private var concurrentFrontCameraId: String? = null
     private var concurrentBackCameraId: String? = null
+    private var frontCam2: FrontCamera2Pipeline? = null
 
     private val permissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
@@ -162,6 +163,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onPause() {
         super.onPause()
+        stopFrontCamera2Pipeline()
         drivingStatusMonitor.stop()
     }
 
@@ -234,6 +236,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun bindUseCasesInternal(provider: ProcessCameraProvider) {
         provider.unbindAll()
+        stopFrontCamera2Pipeline()
 
         val detectorOptions = FaceDetectorOptions.Builder()
             .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_ACCURATE)
@@ -246,55 +249,82 @@ class MainActivity : AppCompatActivity() {
         faceDetector?.close()
         faceDetector = FaceDetection.getClient(detectorOptions)
 
-        val imageAnalysis = ImageAnalysis.Builder()
-            .setTargetResolution(ANALYSIS_TARGET_RESOLUTION)
-            .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-            .build()
-
+        analyzer?.close()
         analyzer = DriveSenseAnalyzer(
             context = applicationContext,
             detector = faceDetector!!,
             mainExecutor = mainThreadExecutor,
             onStateUpdated = ::handleDriverState
         )
-        imageAnalysis.setAnalyzer(cameraExecutor, analyzer!!)
 
-        val useFrontPreview = !supportsConcurrentCameras || !roadDetectionEnabled
-        binding.frontPreviewContainer.visibility = if (useFrontPreview) View.VISIBLE else View.INVISIBLE
-        val frontGroupBuilder = UseCaseGroup.Builder()
-        if (useFrontPreview) {
-            val frontSurfaceProvider = binding.frontViewFinder.surfaceProvider
-            val frontPreview = Preview.Builder()
-                .setTargetResolution(PREVIEW_TARGET_RESOLUTION)
-                .setTargetRotation(binding.frontViewFinder.display?.rotation ?: Surface.ROTATION_0)
-                .build()
-                .also {
-                    it.setSurfaceProvider { request ->
-                        Log.d(TAG, "Front surface requested: ${request.resolution}")
-                        frontSurfaceProvider.onSurfaceRequested(request)
-                    }
-                }
-            frontGroupBuilder.addUseCase(frontPreview)
+        if (supportsConcurrentCameras && roadDetectionEnabled) {
+            binding.frontPreviewContainer.visibility = View.INVISIBLE
+            updateRearCameraUiVisibility(true)
+            if (bindRearCameraWithFrontPipeline(provider)) {
+                observeFrontCameraState(null)
+                return
+            }
+
+            Log.w(TAG, "Falling back to single-camera mode after concurrent bind failure")
+            roadDetectionEnabled = false
+            settings.edit { putBoolean(KEY_ROAD_DETECTION_ENABLED, false) }
+            setRoadDetectionSwitchChecked(false)
         }
-        val frontGroup = frontGroupBuilder
+
+        binding.frontPreviewContainer.visibility = View.VISIBLE
+        updateRearCameraUiVisibility(false)
+        bindFrontCameraOnly(provider)
+    }
+
+    private fun bindFrontCameraOnly(provider: ProcessCameraProvider) {
+        val analyzerInstance = analyzer ?: run {
+            Log.w(TAG, "Analyzer unavailable; cannot bind front camera")
+            return
+        }
+
+        roadObjectAnalyzer = null
+        releaseRoadObjectDetector()
+        binding.rearOverlay.clearDetections()
+
+        val imageAnalysis = ImageAnalysis.Builder()
+            .setTargetResolution(ANALYSIS_TARGET_RESOLUTION)
+            .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+            .build()
+        imageAnalysis.setAnalyzer(cameraExecutor, analyzerInstance)
+
+        val frontSurfaceProvider = binding.frontViewFinder.surfaceProvider
+        val frontPreview = Preview.Builder()
+            .setTargetResolution(PREVIEW_TARGET_RESOLUTION)
+            .setTargetRotation(binding.frontViewFinder.display?.rotation ?: Surface.ROTATION_0)
+            .build()
+            .also {
+                it.setSurfaceProvider { request ->
+                    Log.d(TAG, "Front surface requested: ${request.resolution}")
+                    frontSurfaceProvider.onSurfaceRequested(request)
+                }
+            }
+
+        val frontGroup = UseCaseGroup.Builder()
+            .addUseCase(frontPreview)
             .addUseCase(imageAnalysis)
             .build()
 
-        val frontCameraSelector = getFrontCameraSelector()
-        var frontCamera: Camera? = null
-
-        if (!supportsConcurrentCameras) {
-            roadObjectAnalyzer = null
-            releaseRoadObjectDetector()
-            binding.rearOverlay.clearDetections()
-            updateRearCameraUiVisibility(false)
-            try {
-                frontCamera = provider.bindToLifecycle(this, frontCameraSelector, frontGroup)
-            } catch (exception: Exception) {
-                handleDriverState(DriverState.Error(exception.localizedMessage ?: getString(R.string.status_error)))
-            }
+        try {
+            val frontCamera = provider.bindToLifecycle(this, getFrontCameraSelector(), frontGroup)
             observeFrontCameraState(frontCamera)
-            return
+            observeRearCameraState(null)
+        } catch (exception: Exception) {
+            handleDriverState(DriverState.Error(exception.localizedMessage ?: getString(R.string.status_error)))
+        }
+    }
+
+    private fun bindRearCameraWithFrontPipeline(provider: ProcessCameraProvider): Boolean {
+        ensureRoadObjectDetector()
+        val detector = roadObjectDetector ?: run {
+            Log.w(TAG, "Road object detector unavailable; cannot enable road detection")
+            roadObjectAnalyzer = null
+            binding.rearOverlay.clearDetections()
+            return false
         }
 
         val rearSurfaceProvider = binding.rearViewFinder.surfaceProvider
@@ -309,98 +339,87 @@ class MainActivity : AppCompatActivity() {
                 }
             }
 
-        val rearCameraSelector = getRearCameraSelector()
+        val rearImageAnalysis = ImageAnalysis.Builder()
+            .setTargetResolution(ANALYSIS_TARGET_RESOLUTION)
+            .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+            .build()
 
-        val rearGroupBuilder = UseCaseGroup.Builder()
+        val roadAnalyzer = RoadObjectAnalyzer(
+            detector = detector,
+            mainExecutor = mainThreadExecutor,
+            onDetectionsUpdated = ::onRoadDetectionsUpdated
+        )
+        roadObjectAnalyzer = roadAnalyzer
+        rearImageAnalysis.setAnalyzer(cameraExecutor, roadAnalyzer)
+
+        val rearGroup = UseCaseGroup.Builder()
             .addUseCase(rearPreview)
+            .addUseCase(rearImageAnalysis)
+            .build()
 
-        var rearImageAnalysis: ImageAnalysis? = null
-        if (roadDetectionEnabled) {
-            ensureRoadObjectDetector()
-            rearImageAnalysis = ImageAnalysis.Builder()
-                .setTargetResolution(ANALYSIS_TARGET_RESOLUTION)
-                .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                .build()
-            roadObjectAnalyzer = RoadObjectAnalyzer(
-                detector = roadObjectDetector!!,
-                mainExecutor = mainThreadExecutor,
-                onDetectionsUpdated = ::onRoadDetectionsUpdated
-            )
-            rearImageAnalysis.setAnalyzer(cameraExecutor, roadObjectAnalyzer!!)
-            rearGroupBuilder.addUseCase(rearImageAnalysis)
-        } else {
+        return try {
+            val rearCamera = provider.bindToLifecycle(this, getRearCameraSelector(), rearGroup)
+            observeRearCameraState(rearCamera)
+            startFrontCamera2Pipeline()
+            true
+        } catch (exception: Exception) {
+            Log.e(TAG, "Failed to bind rear camera use cases", exception)
             roadObjectAnalyzer = null
             releaseRoadObjectDetector()
             binding.rearOverlay.clearDetections()
+            false
         }
+    }
 
-        val rearGroup = rearGroupBuilder.build()
-        val frontConfig = ConcurrentCamera.SingleCameraConfig(
-            frontCameraSelector,
-            frontGroup,
-            this
-        )
-        val rearConfig = ConcurrentCamera.SingleCameraConfig(
-            rearCameraSelector,
-            rearGroup,
-            this
-        )
-
-        var concurrentCamera: ConcurrentCamera? = null
-        var rearCamera: Camera? = null
-        var roadDetectionFallbackAttempted = false
-
-        try {
-            concurrentCamera = provider.bindToLifecycle(listOf(frontConfig, rearConfig))
-        } catch (exception: Exception) {
-            Log.w(TAG, "Failed to bind concurrent camera use cases", exception)
-            if (roadDetectionEnabled && rearImageAnalysis != null) {
-                roadDetectionFallbackAttempted = true
-                binding.rearOverlay.clearDetections()
-                roadObjectAnalyzer = null
-                releaseRoadObjectDetector()
-                val fallbackRearGroup = UseCaseGroup.Builder()
-                    .addUseCase(rearPreview)
-                    .build()
-                val fallbackRearConfig = ConcurrentCamera.SingleCameraConfig(
-                    rearCameraSelector,
-                    fallbackRearGroup,
-                    this
-                )
-                try {
-                    concurrentCamera = provider.bindToLifecycle(listOf(frontConfig, fallbackRearConfig))
-                } catch (fallbackException: Exception) {
-                    Log.e(TAG, "Failed to bind concurrent cameras with preview-only rear", fallbackException)
-                }
-            }
-            if (concurrentCamera == null && !roadDetectionFallbackAttempted) {
-                binding.rearOverlay.clearDetections()
-                releaseRoadObjectDetector()
-            }
-        }
-
-        if (concurrentCamera == null) {
-            try {
-                frontCamera = provider.bindToLifecycle(this, frontCameraSelector, frontGroup)
-            } catch (exception: Exception) {
-                handleDriverState(DriverState.Error(exception.localizedMessage ?: getString(R.string.status_error)))
-            }
-            observeFrontCameraState(frontCamera)
-            observeRearCameraState(null)
+    private fun startFrontCamera2Pipeline() {
+        if (analyzer == null) {
+            Log.w(TAG, "Analyzer unavailable; cannot start front Camera2 pipeline")
             return
         }
 
-        frontCamera = concurrentCamera.findCamera(
-            concurrentFrontCameraId,
-            CameraCharacteristics.LENS_FACING_FRONT
-        )
-        rearCamera = concurrentCamera.findCamera(
-            concurrentBackCameraId,
-            CameraCharacteristics.LENS_FACING_BACK
-        )
+        var pipeline: FrontCamera2Pipeline? = null
+        pipeline = FrontCamera2Pipeline(
+            context = this,
+            targetSize = Size(320, 240)
+        ) { image, rotationDegrees ->
+            val activePipeline = pipeline
+            if (activePipeline == null) {
+                try {
+                    image.close()
+                } catch (_: Throwable) {
+                }
+                return@FrontCamera2Pipeline
+            }
+            val currentAnalyzer = analyzer
+            if (currentAnalyzer == null) {
+                activePipeline.markFrameDone(image)
+                return@FrontCamera2Pipeline
+            }
+            try {
+                currentAnalyzer.analyze(image, rotationDegrees) {
+                    activePipeline.markFrameDone(image)
+                }
+            } catch (error: Throwable) {
+                Log.w(TAG, "Front Camera2 frame processing error", error)
+                activePipeline.markFrameDone(image)
+            }
+        }
+        frontCam2 = pipeline
+        pipeline.start(currentDisplayRotation())
+    }
 
-        observeFrontCameraState(frontCamera)
-        observeRearCameraState(rearCamera)
+    private fun stopFrontCamera2Pipeline() {
+        frontCam2?.stop()
+        frontCam2 = null
+    }
+
+    private fun currentDisplayRotation(): Int {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            display?.rotation ?: Surface.ROTATION_0
+        } else {
+            @Suppress("DEPRECATION")
+            windowManager.defaultDisplay?.rotation ?: Surface.ROTATION_0
+        }
     }
 
     private fun observeFrontCameraState(camera: Camera?) {
@@ -538,6 +557,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun releaseCamera() {
         cameraProvider?.unbindAll()
+        stopFrontCamera2Pipeline()
         analyzer?.close()
         analyzer = null
         faceDetector?.close()
@@ -545,22 +565,6 @@ class MainActivity : AppCompatActivity() {
         roadObjectAnalyzer = null
         releaseRoadObjectDetector()
         binding.rearOverlay.clearDetections()
-    }
-
-    private fun ConcurrentCamera.findCamera(cameraId: String?, lensFacing: Int): Camera? {
-        val byId = if (!cameraId.isNullOrEmpty()) {
-            cameras.firstOrNull { cam ->
-                Camera2CameraInfo.from(cam.cameraInfo).cameraId == cameraId
-            }
-        } else null
-        if (byId != null) return byId
-
-        // Compare against CameraCharacteristics.* constants
-        return cameras.firstOrNull { cam ->
-            val facing = Camera2CameraInfo.from(cam.cameraInfo)
-                .getCameraCharacteristic(CameraCharacteristics.LENS_FACING)
-            facing == lensFacing
-        }
     }
 
     private fun ProcessCameraProvider.isConcurrentCameraModeSupportedCompat(): Boolean {
