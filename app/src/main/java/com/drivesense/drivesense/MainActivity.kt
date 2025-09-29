@@ -30,7 +30,6 @@ import androidx.camera.view.PreviewView
 import androidx.core.content.ContextCompat
 import androidx.core.content.edit
 import androidx.core.view.doOnLayout
-import com.drivesense.drivesense.camera2.FrontCamera2Pipeline
 import com.drivesense.drivesense.databinding.ActivityMainBinding
 import com.drivesense.drivesense.ui.DetectionOverlayView.RoadObjectDetection
 import com.google.mlkit.vision.face.FaceDetection
@@ -71,7 +70,6 @@ class MainActivity : AppCompatActivity() {
     private var suppressRearPreviewSwitchChange = false
     private var concurrentFrontCameraId: String? = null
     private var concurrentBackCameraId: String? = null
-    private var frontCam2: FrontCamera2Pipeline? = null
     private var frontPreviewResolution: Size? = null
     private var rearPreviewResolution: Size? = null
     private var frontPreviewGuidelinePercent: Float? = null
@@ -198,7 +196,6 @@ class MainActivity : AppCompatActivity() {
 
     override fun onPause() {
         super.onPause()
-        stopFrontCamera2Pipeline()
         drivingStatusMonitor.stop()
     }
 
@@ -271,7 +268,6 @@ class MainActivity : AppCompatActivity() {
 
     private fun bindUseCasesInternal(provider: ProcessCameraProvider) {
         provider.unbindAll()
-        stopFrontCamera2Pipeline()
 
         val detectorOptions = FaceDetectorOptions.Builder()
             .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_ACCURATE)
@@ -295,8 +291,7 @@ class MainActivity : AppCompatActivity() {
         if (supportsConcurrentCameras && roadDetectionEnabled) {
             applyFrontPreviewVisibility()
             applyRearPreviewVisibility()
-            if (bindRearCameraWithFrontPipeline(provider)) {
-                observeFrontCameraState(null)
+            if (bindFrontAndRearCameras(provider)) {
                 return
             }
 
@@ -361,7 +356,12 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun bindRearCameraWithFrontPipeline(provider: ProcessCameraProvider): Boolean {
+    private fun bindFrontAndRearCameras(provider: ProcessCameraProvider): Boolean {
+        val analyzerInstance = analyzer ?: run {
+            Log.w(TAG, "Analyzer unavailable; cannot bind front camera")
+            return false
+        }
+
         ensureRoadObjectDetector()
         val detector = roadObjectDetector ?: run {
             Log.w(TAG, "Road object detector unavailable; cannot enable road detection")
@@ -369,6 +369,35 @@ class MainActivity : AppCompatActivity() {
             binding.rearOverlay.clearDetections()
             return false
         }
+
+        val frontSurfaceProvider = binding.frontViewFinder.surfaceProvider
+        val configuredFrontResolution = frontPreviewResolution
+            ?: findHighestPreviewResolution(CameraCharacteristics.LENS_FACING_FRONT)
+                ?.also { frontPreviewResolution = it }
+        val frontPreviewBuilder = Preview.Builder()
+        configuredFrontResolution?.let { frontPreviewBuilder.setTargetResolution(it) }
+        val frontPreview = frontPreviewBuilder
+            .setTargetRotation(binding.frontViewFinder.display?.rotation ?: Surface.ROTATION_0)
+            .build()
+            .also {
+                it.setSurfaceProvider { request ->
+                    Log.d(TAG, "Front surface requested: ${request.resolution}")
+                    frontPreviewResolution = request.resolution
+                    updateFrontPreviewAspect(request.resolution)
+                    frontSurfaceProvider.onSurfaceRequested(request)
+                }
+            }
+
+        val frontImageAnalysis = ImageAnalysis.Builder()
+            .setTargetResolution(ANALYSIS_TARGET_RESOLUTION)
+            .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+            .build()
+        frontImageAnalysis.setAnalyzer(cameraExecutor, analyzerInstance)
+
+        val frontGroup = UseCaseGroup.Builder()
+            .addUseCase(frontPreview)
+            .addUseCase(frontImageAnalysis)
+            .build()
 
         val rearSurfaceProvider = binding.rearViewFinder.surfaceProvider
         val configuredRearResolution = rearPreviewResolution
@@ -406,62 +435,20 @@ class MainActivity : AppCompatActivity() {
             .build()
 
         return try {
+            val frontCamera = provider.bindToLifecycle(this, getFrontCameraSelector(), frontGroup)
             val rearCamera = provider.bindToLifecycle(this, getRearCameraSelector(), rearGroup)
+            logBound(frontCamera, "FRONT")
             logBound(rearCamera, "REAR")
+            observeFrontCameraState(frontCamera)
             observeRearCameraState(rearCamera)
-            startFrontCamera2Pipeline()
             true
         } catch (exception: Exception) {
-            Log.e(TAG, "Failed to bind rear camera use cases", exception)
+            Log.e(TAG, "Failed to bind concurrent front and rear camera use cases", exception)
+            provider.unbind(frontPreview, frontImageAnalysis, rearPreview, rearImageAnalysis)
             roadObjectAnalyzer = null
             releaseRoadObjectDetector()
             binding.rearOverlay.clearDetections()
             false
-        }
-    }
-
-    private fun startFrontCamera2Pipeline() {
-        val currentAnalyzer = analyzer
-        if (currentAnalyzer == null) {
-            Log.w(TAG, "Analyzer unavailable; cannot start front Camera2 pipeline")
-            return
-        }
-
-        val pipeline = FrontCamera2Pipeline(
-            context = this
-        ) { image, rotationDegrees ->
-            val activePipeline = frontCam2
-            if (activePipeline == null) {
-                try {
-                    image.close()
-                } catch (_: Throwable) {
-                }
-                return@FrontCamera2Pipeline
-            }
-            try {
-                currentAnalyzer.analyze(image, rotationDegrees) {
-                    activePipeline.markFrameDone(image)
-                }
-            } catch (error: Throwable) {
-                Log.w(TAG, "Front Camera2 frame processing error", error)
-                activePipeline.markFrameDone(image)
-            }
-        }
-        frontCam2 = pipeline
-        pipeline.start(currentDisplayRotation())
-    }
-
-    private fun stopFrontCamera2Pipeline() {
-        frontCam2?.stop()
-        frontCam2 = null
-    }
-
-    private fun currentDisplayRotation(): Int {
-        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            display?.rotation ?: Surface.ROTATION_0
-        } else {
-            @Suppress("DEPRECATION")
-            windowManager.defaultDisplay?.rotation ?: Surface.ROTATION_0
         }
     }
 
@@ -600,7 +587,6 @@ class MainActivity : AppCompatActivity() {
 
     private fun releaseCamera() {
         cameraProvider?.unbindAll()
-        stopFrontCamera2Pipeline()
         analyzer?.close()
         analyzer = null
         faceDetector?.close()
