@@ -28,7 +28,8 @@
             android:layout_width="match_parent"
             android:layout_height="match_parent"
             android:keepScreenOn="true"
-            app:implementationMode="compatible" />
+            app:implementationMode="performance"
+            app:scaleType="fitCenter" />
 
     </FrameLayout>
 
@@ -46,7 +47,8 @@
             android:layout_width="match_parent"
             android:layout_height="match_parent"
             android:keepScreenOn="true"
-            app:implementationMode="compatible" />
+            app:implementationMode="performance"
+            app:scaleType="fitCenter" />
 
         <com.drivesense.drivesense.ui.DetectionOverlayView
             android:id="@+id/rearOverlay"

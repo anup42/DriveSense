@@ -3,6 +3,7 @@ package com.drivesense.drivesense
 import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
+import android.graphics.SurfaceTexture
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager
 import android.media.AudioManager
@@ -28,6 +29,7 @@ import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.core.content.ContextCompat
 import androidx.core.content.edit
+import androidx.core.view.doOnLayout
 import com.drivesense.drivesense.camera2.FrontCamera2Pipeline
 import com.drivesense.drivesense.databinding.ActivityMainBinding
 import com.drivesense.drivesense.ui.DetectionOverlayView.RoadObjectDetection
@@ -66,6 +68,9 @@ class MainActivity : AppCompatActivity() {
     private var concurrentFrontCameraId: String? = null
     private var concurrentBackCameraId: String? = null
     private var frontCam2: FrontCamera2Pipeline? = null
+    private var frontPreviewResolution: Size? = null
+    private var rearPreviewResolution: Size? = null
+    private var frontPreviewGuidelinePercent: Float? = null
 
     private val permissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
@@ -94,13 +99,13 @@ class MainActivity : AppCompatActivity() {
         setContentView(binding.root)
 
         binding.frontViewFinder.implementationMode =
-            PreviewView.ImplementationMode.COMPATIBLE
+            PreviewView.ImplementationMode.PERFORMANCE
         binding.frontViewFinder.scaleType =
-            PreviewView.ScaleType.FILL_CENTER
+            PreviewView.ScaleType.FIT_CENTER
         binding.rearViewFinder.implementationMode =
-            PreviewView.ImplementationMode.COMPATIBLE
+            PreviewView.ImplementationMode.PERFORMANCE
         binding.rearViewFinder.scaleType =
-            PreviewView.ScaleType.FILL_CENTER
+            PreviewView.ScaleType.FIT_CENTER
 
         cameraExecutor = Executors.newSingleThreadExecutor()
         binding.lastEventText.visibility = View.GONE
@@ -295,13 +300,19 @@ class MainActivity : AppCompatActivity() {
         imageAnalysis.setAnalyzer(cameraExecutor, analyzerInstance)
 
         val frontSurfaceProvider = binding.frontViewFinder.surfaceProvider
-        val frontPreview = Preview.Builder()
-            .setTargetResolution(PREVIEW_TARGET_RESOLUTION)
+        val configuredFrontResolution = frontPreviewResolution
+            ?: findHighestPreviewResolution(CameraCharacteristics.LENS_FACING_FRONT)
+                ?.also { frontPreviewResolution = it }
+        val frontPreviewBuilder = Preview.Builder()
+        configuredFrontResolution?.let { frontPreviewBuilder.setTargetResolution(it) }
+        val frontPreview = frontPreviewBuilder
             .setTargetRotation(binding.frontViewFinder.display?.rotation ?: Surface.ROTATION_0)
             .build()
             .also {
                 it.setSurfaceProvider { request ->
                     Log.d(TAG, "Front surface requested: ${request.resolution}")
+                    frontPreviewResolution = request.resolution
+                    updateFrontPreviewAspect(request.resolution)
                     frontSurfaceProvider.onSurfaceRequested(request)
                 }
             }
@@ -331,13 +342,18 @@ class MainActivity : AppCompatActivity() {
         }
 
         val rearSurfaceProvider = binding.rearViewFinder.surfaceProvider
-        val rearPreview = Preview.Builder()
-            .setTargetResolution(PREVIEW_TARGET_RESOLUTION)
+        val configuredRearResolution = rearPreviewResolution
+            ?: findHighestPreviewResolution(CameraCharacteristics.LENS_FACING_BACK)
+                ?.also { rearPreviewResolution = it }
+        val rearPreviewBuilder = Preview.Builder()
+        configuredRearResolution?.let { rearPreviewBuilder.setTargetResolution(it) }
+        val rearPreview = rearPreviewBuilder
             .setTargetRotation(binding.rearViewFinder.display?.rotation ?: Surface.ROTATION_0)
             .build()
             .also {
                 it.setSurfaceProvider { request ->
                     Log.d(TAG, "Rear surface requested: ${request.resolution}")
+                    rearPreviewResolution = request.resolution
                     rearSurfaceProvider.onSurfaceRequested(request)
                 }
             }
@@ -774,7 +790,56 @@ class MainActivity : AppCompatActivity() {
 
     private fun updateRearCameraUiVisibility(showRearPreview: Boolean) {
         binding.rearPreviewContainer.visibility = if (showRearPreview) View.VISIBLE else View.GONE
-        binding.midGuideline.setGuidelinePercent(if (showRearPreview) 0.5f else 1f)
+        if (showRearPreview) {
+            binding.midGuideline.setGuidelinePercent(0.5f)
+        } else {
+            applyFrontPreviewGuidelinePercent()
+        }
+    }
+
+    private fun updateFrontPreviewAspect(resolution: Size) {
+        if (resolution.width <= 0 || resolution.height <= 0) {
+            return
+        }
+        val rootView = binding.root
+        if (rootView.width == 0 || rootView.height == 0) {
+            rootView.doOnLayout { updateFrontPreviewAspect(resolution) }
+            return
+        }
+        val desiredHeight = rootView.width.toFloat() * resolution.height.toFloat() /
+            resolution.width.toFloat()
+        val percent = (desiredHeight / rootView.height.toFloat()).coerceIn(0f, 1f)
+        frontPreviewGuidelinePercent = percent
+        applyFrontPreviewGuidelinePercent()
+    }
+
+    private fun applyFrontPreviewGuidelinePercent() {
+        if (binding.rearPreviewContainer.visibility == View.VISIBLE) {
+            return
+        }
+        val percent = frontPreviewGuidelinePercent ?: 1f
+        binding.midGuideline.setGuidelinePercent(percent)
+    }
+
+    private fun findHighestPreviewResolution(lensFacing: Int): Size? {
+        val cameraManager = getSystemService(Context.CAMERA_SERVICE) as? CameraManager ?: return null
+        var bestSize: Size? = null
+        for (cameraId in cameraManager.cameraIdList) {
+            val characteristics = cameraManager.getCameraCharacteristics(cameraId)
+            val facing = characteristics.get(CameraCharacteristics.LENS_FACING)
+            if (facing != lensFacing) continue
+            val configMap = characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+            val sizes = configMap?.getOutputSizes(SurfaceTexture::class.java) ?: continue
+            val candidate = sizes.maxByOrNull { size -> size.width.toLong() * size.height.toLong() }
+            if (candidate != null) {
+                val candidatePixels = candidate.width.toLong() * candidate.height.toLong()
+                val currentPixels = bestSize?.let { it.width.toLong() * it.height.toLong() } ?: -1L
+                if (candidatePixels > currentPixels) {
+                    bestSize = candidate
+                }
+            }
+        }
+        return bestSize
     }
 
     companion object {
@@ -786,7 +851,6 @@ class MainActivity : AppCompatActivity() {
         private const val PREFS_NAME = "drivesense_settings"
         private const val KEY_REQUIRE_DRIVING_CHECK = "require_driving_check"
         private const val KEY_ROAD_DETECTION_ENABLED = "road_detection_enabled"
-        private val PREVIEW_TARGET_RESOLUTION = Size(1280, 960)
         private val ANALYSIS_TARGET_RESOLUTION = Size(640, 480)
     }
 }
