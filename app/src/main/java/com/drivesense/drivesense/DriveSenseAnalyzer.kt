@@ -7,6 +7,7 @@ import android.graphics.ImageFormat
 import android.graphics.Matrix
 import android.graphics.PointF
 import android.graphics.Rect
+import android.media.Image
 import android.graphics.YuvImage
 import android.os.SystemClock
 import androidx.camera.core.ImageAnalysis
@@ -71,10 +72,32 @@ class DriveSenseAnalyzer(
             return
         }
 
-        val rotationDegrees = imageProxy.imageInfo.rotationDegrees
+        processFrame(
+            mediaImage = mediaImage,
+            rotationDegrees = imageProxy.imageInfo.rotationDegrees,
+            bitmapProvider = { imageProxyToBitmap(imageProxy) },
+            onClose = { imageProxy.close() }
+        )
+    }
+
+    fun analyze(mediaImage: Image, rotationDegrees: Int, onClose: () -> Unit) {
+        processFrame(
+            mediaImage = mediaImage,
+            rotationDegrees = rotationDegrees,
+            bitmapProvider = { mediaImageToBitmap(mediaImage, rotationDegrees) },
+            onClose = onClose
+        )
+    }
+
+    private fun processFrame(
+        mediaImage: Image,
+        rotationDegrees: Int,
+        bitmapProvider: () -> Bitmap?,
+        onClose: () -> Unit
+    ) {
         val inputImage = InputImage.fromMediaImage(mediaImage, rotationDegrees)
         val mediaPipeMetrics = runCatching {
-            imageProxyToBitmap(imageProxy)?.let { detectWithMediaPipe(it) }
+            bitmapProvider()?.let { detectWithMediaPipe(it) }
         }.getOrNull()
         detector.process(inputImage)
             .addOnSuccessListener { faces ->
@@ -85,7 +108,7 @@ class DriveSenseAnalyzer(
                 publishState(DriverState.Error(error.localizedMessage ?: "Face detector error"))
             }
             .addOnCompleteListener {
-                imageProxy.close()
+                onClose()
             }
     }
 
@@ -309,7 +332,12 @@ class DriveSenseAnalyzer(
         return t * t * (3f - 2f * t)
     }
 
-    private fun imageProxyToBitmap(image: ImageProxy): Bitmap? {
+    private fun imageProxyToBitmap(imageProxy: ImageProxy): Bitmap? {
+        val mediaImage = imageProxy.image ?: return null
+        return mediaImageToBitmap(mediaImage, imageProxy.imageInfo.rotationDegrees)
+    }
+
+    private fun mediaImageToBitmap(image: Image, rotationDegrees: Int): Bitmap? {
         val planes = image.planes
         if (planes.size < 3) return null
 
@@ -357,7 +385,7 @@ class DriveSenseAnalyzer(
         yuvImage.compressToJpeg(Rect(0, 0, width, height), 90, out)
         val jpegBytes = out.toByteArray()
         val bitmap = BitmapFactory.decodeByteArray(jpegBytes, 0, jpegBytes.size) ?: return null
-        return bitmap.rotate(image.imageInfo.rotationDegrees)
+        return bitmap.rotate(rotationDegrees)
     }
 
     private fun Bitmap.rotate(degrees: Int): Bitmap {
