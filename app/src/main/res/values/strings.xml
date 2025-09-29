@@ -11,6 +11,8 @@
     <string name="status_error">Camera offline. Please restart DriveSense.</string>
     <string name="label_require_driving">Require driving detection</string>
     <string name="label_enable_road_detection">Enable road object detection</string>
+    <string name="label_show_front_preview">Show driver preview</string>
+    <string name="label_show_rear_preview">Show road preview</string>
     <string name="status_waiting_for_driving">Waiting for vehicle motion…</string>
     <string name="status_driving_detection_unavailable">Driving detection unavailable. Disable the driving check to continue.</string>
     <string name="status_driving_detected">Driving detected</string>
