@@ -7,6 +7,7 @@ import android.graphics.ImageFormat
 import android.graphics.Matrix
 import android.graphics.PointF
 import android.graphics.Rect
+import android.graphics.RectF
 import android.media.Image
 import android.graphics.YuvImage
 import android.os.SystemClock
@@ -26,12 +27,16 @@ import java.util.concurrent.Executor
 import kotlin.LazyThreadSafetyMode
 import kotlin.math.abs
 import kotlin.math.hypot
+import kotlin.math.max
+import kotlin.math.min
 
 class DriveSenseAnalyzer(
     private val context: Context,
     private val detector: FaceDetector,
     private val mainExecutor: Executor,
     private val onStateUpdated: (DriverState) -> Unit,
+    private val onDriverFaceUpdated: (RectF?) -> Unit = {},
+    private val mirrorPreview: Boolean = false,
     private val closedEyesThresholdMs: Long = 1500L,
     private val minEyeOpenProbability: Float = 0.4f
 ) : ImageAnalysis.Analyzer {
@@ -57,7 +62,7 @@ class DriveSenseAnalyzer(
                     .build()
             )
             .setRunningMode(RunningMode.VIDEO)
-            .setNumFaces(1)
+            .setNumFaces(MAX_MEDIAPIPE_FACES)
             .setMinFaceDetectionConfidence(0.5f)
             .setMinTrackingConfidence(0.5f)
             .setMinFacePresenceConfidence(0.5f)
@@ -96,15 +101,22 @@ class DriveSenseAnalyzer(
         onClose: () -> Unit
     ) {
         val inputImage = InputImage.fromMediaImage(mediaImage, rotationDegrees)
+        val frameInfo = FrameInfo(
+            width = mediaImage.width,
+            height = mediaImage.height,
+            rotationDegrees = rotationDegrees
+        )
         val mediaPipeMetrics = runCatching {
             bitmapProvider()?.let { detectWithMediaPipe(it) }
         }.getOrNull()
         detector.process(inputImage)
             .addOnSuccessListener { faces ->
-                val newState = evaluateState(faces, mediaPipeMetrics)
-                publishState(newState)
+                val evaluation = evaluateState(faces, mediaPipeMetrics, frameInfo)
+                publishDriverFace(evaluation.driverFaceBounds)
+                publishState(evaluation.state)
             }
             .addOnFailureListener { error ->
+                publishDriverFace(null)
                 publishState(DriverState.Error(error.localizedMessage ?: "Face detector error"))
             }
             .addOnCompleteListener {
@@ -113,22 +125,29 @@ class DriveSenseAnalyzer(
     }
 
     fun close() {
+        publishDriverFace(null)
         if (faceLandmarkerInitialized) {
             faceLandmarker.close()
         }
     }
 
+
     private fun evaluateState(
         faces: List<Face>,
-        mediaPipeMetrics: MediaPipeEyeMetrics?
-    ): DriverState {
+        mediaPipeMetrics: MediaPipeEyeMetrics?,
+        frameInfo: FrameInfo,
+    ): EvaluationResult {
         if (faces.isEmpty()) {
             lastEyesClosedAt = NO_TIMESTAMP
             resetMediaPipeFilters()
-            return DriverState.NoFace
+            return EvaluationResult(DriverState.NoFace, null)
         }
 
-        val primaryFace = faces.maxByOrNull { it.boundingBox.width() * it.boundingBox.height() } ?: faces.first()
+        val primaryFace = faces
+            .maxByOrNull { it.boundingBox.width().toLong() * it.boundingBox.height().toLong() }
+            ?: faces.first()
+        val normalizedBounds = primaryFace.boundingBox.toNormalizedBounds(frameInfo, mirrorPreview)
+
         val leftEyeProbability = primaryFace.leftEyeOpenProbability
         val rightEyeProbability = primaryFace.rightEyeOpenProbability
         val smoothedLeftEyeProbability = leftEyeProbability?.takeIf { it >= 0f }?.let {
@@ -224,7 +243,7 @@ class DriveSenseAnalyzer(
             !mediaPipeAspectAvailable && !mediaPipeProbabilityAvailable
         ) {
             lastEyesClosedAt = NO_TIMESTAMP
-            return DriverState.Attentive
+            return EvaluationResult(DriverState.Attentive, normalizedBounds)
         }
 
         val votesForClosed = listOf(
@@ -253,22 +272,23 @@ class DriveSenseAnalyzer(
             }
             val closedDuration = SystemClock.elapsedRealtime() - lastEyesClosedAt
             return if (closedDuration >= closedEyesThresholdMs) {
-                DriverState.Drowsy(closedDuration)
+                EvaluationResult(DriverState.Drowsy(closedDuration), normalizedBounds)
             } else {
-                DriverState.Attentive
+                EvaluationResult(DriverState.Attentive, normalizedBounds)
             }
         }
 
         lastEyesClosedAt = NO_TIMESTAMP
-        return DriverState.Attentive
+        return EvaluationResult(DriverState.Attentive, normalizedBounds)
     }
 
     private fun detectWithMediaPipe(bitmap: Bitmap): MediaPipeEyeMetrics? {
         val mpImage = BitmapImageBuilder(bitmap).build()
         val result = faceLandmarker.detectForVideo(mpImage, SystemClock.uptimeMillis())
-        if (result.faceLandmarks().isEmpty()) return null
+        val landmarksList = result.faceLandmarks()
+        if (landmarksList.isEmpty()) return null
 
-        val landmarks = result.faceLandmarks()[0]
+        val landmarks = landmarksList.maxByOrNull { computeNormalizedArea(it) } ?: return null
         val leftEar = ear(
             landmarks,
             pOuter = 33,
@@ -297,6 +317,25 @@ class DriveSenseAnalyzer(
             leftOpenProbability = leftProbability,
             rightOpenProbability = rightProbability
         )
+    }
+
+    private fun computeNormalizedArea(landmarks: List<NormalizedLandmark>): Float {
+        if (landmarks.isEmpty()) return 0f
+        var minX = Float.MAX_VALUE
+        var maxX = -Float.MAX_VALUE
+        var minY = Float.MAX_VALUE
+        var maxY = -Float.MAX_VALUE
+        landmarks.forEach { landmark ->
+            val x = landmark.x()
+            val y = landmark.y()
+            if (x < minX) minX = x
+            if (x > maxX) maxX = x
+            if (y < minY) minY = y
+            if (y > maxY) maxY = y
+        }
+        val width = (maxX - minX).coerceAtLeast(0f)
+        val height = (maxY - minY).coerceAtLeast(0f)
+        return width * height
     }
 
     private fun ear(
@@ -409,6 +448,93 @@ class DriveSenseAnalyzer(
         val rightOpenProbability: Float
     )
 
+    private data class EvaluationResult(
+        val state: DriverState,
+        val driverFaceBounds: RectF?
+    )
+
+    private data class FrameInfo(
+        val width: Int,
+        val height: Int,
+        val rotationDegrees: Int
+    )
+
+    private fun publishDriverFace(bounds: RectF?) {
+        val copy = bounds?.let { RectF(it) }
+        mainExecutor.execute { onDriverFaceUpdated(copy) }
+    }
+
+    private fun Rect.toNormalizedBounds(
+        frameInfo: FrameInfo,
+        mirrorHorizontally: Boolean,
+    ): RectF? {
+        if (width() <= 0 || height() <= 0) {
+            return null
+        }
+        val imageWidth = frameInfo.width.toFloat()
+        val imageHeight = frameInfo.height.toFloat()
+        if (imageWidth <= 0f || imageHeight <= 0f) {
+            return null
+        }
+
+        val rotation = ((frameInfo.rotationDegrees % 360) + 360) % 360
+        val (normalizedLeft, normalizedTop, normalizedRight, normalizedBottom) = when (rotation) {
+            0 -> listOf(
+                left / imageWidth,
+                top / imageHeight,
+                right / imageWidth,
+                bottom / imageHeight
+            )
+            90 -> listOf(
+                top / imageHeight,
+                (imageWidth - right) / imageWidth,
+                bottom / imageHeight,
+                (imageWidth - left) / imageWidth
+            )
+            180 -> listOf(
+                (imageWidth - right) / imageWidth,
+                (imageHeight - bottom) / imageHeight,
+                (imageWidth - left) / imageWidth,
+                (imageHeight - top) / imageHeight
+            )
+            270 -> listOf(
+                (imageHeight - bottom) / imageHeight,
+                left / imageWidth,
+                (imageHeight - top) / imageHeight,
+                right / imageWidth
+            )
+            else -> listOf(
+                left / imageWidth,
+                top / imageHeight,
+                right / imageWidth,
+                bottom / imageHeight
+            )
+        }
+
+        var leftNorm = normalizedLeft.coerceIn(0f, 1f)
+        var topNorm = normalizedTop.coerceIn(0f, 1f)
+        var rightNorm = normalizedRight.coerceIn(0f, 1f)
+        var bottomNorm = normalizedBottom.coerceIn(0f, 1f)
+
+        if (mirrorHorizontally) {
+            val mirroredLeft = 1f - rightNorm
+            val mirroredRight = 1f - leftNorm
+            leftNorm = mirroredLeft
+            rightNorm = mirroredRight
+        }
+
+        val finalLeft = min(leftNorm, rightNorm).coerceIn(0f, 1f)
+        val finalRight = max(leftNorm, rightNorm).coerceIn(0f, 1f)
+        val finalTop = min(topNorm, bottomNorm).coerceIn(0f, 1f)
+        val finalBottom = max(topNorm, bottomNorm).coerceIn(0f, 1f)
+
+        if (finalLeft >= finalRight || finalTop >= finalBottom) {
+            return null
+        }
+
+        return RectF(finalLeft, finalTop, finalRight, finalBottom)
+    }
+
     private fun computeEyeAspectRatio(points: List<PointF>?): Float? {
         val eyePoints = points ?: return null
         if (eyePoints.size < MIN_CONTOUR_POINTS) return null
@@ -468,6 +594,7 @@ class DriveSenseAnalyzer(
         private const val VERTICAL_TRIM_RATIO = 0.2f
         private const val SMOOTHING_ALPHA = 0.35f
         private const val FACE_LANDMARKER_ASSET = "face_landmarker.task"
+        private const val MAX_MEDIAPIPE_FACES = 3
         private const val MEDIAPIPE_EAR_CLOSED = 0.20f
         private const val MEDIAPIPE_EAR_OPEN = 0.30f
         private const val MEDIAPIPE_EYE_ASPECT_CLOSED_THRESHOLD = 0.20f

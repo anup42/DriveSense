@@ -31,6 +31,12 @@
             app:implementationMode="performance"
             app:scaleType="fitCenter" />
 
+        <com.drivesense.drivesense.ui.FaceSelectionOverlayView
+            android:id="@+id/frontFaceOverlay"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:layout_gravity="center" />
+
     </FrameLayout>
 
     <FrameLayout
