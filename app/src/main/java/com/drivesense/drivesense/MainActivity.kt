@@ -289,7 +289,11 @@ class MainActivity : AppCompatActivity() {
             context = applicationContext,
             detector = faceDetector!!,
             mainExecutor = mainThreadExecutor,
-            onStateUpdated = ::handleDriverState
+            onStateUpdated = ::handleDriverState,
+            onDriverFaceUpdated = { bounds ->
+                binding.frontFaceOverlay.updateBounds(bounds)
+            },
+            mirrorPreview = true
         )
 
         if (supportsConcurrentCameras && roadDetectionEnabled) {
